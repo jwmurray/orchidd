@@ -21,6 +21,14 @@ use serde_json::{json, Value};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
+// PWA assets are embedded too, so the binary stays self-contained and can be
+// copied to another host without carrying a static/ directory alongside it.
+const MANIFEST_JSON: &str = include_str!("../static/manifest.webmanifest");
+const SERVICE_WORKER_JS: &str = include_str!("../static/sw.js");
+const ICON_192_PNG: &[u8] = include_bytes!("../static/icon-192.png");
+const ICON_512_PNG: &[u8] = include_bytes!("../static/icon-512.png");
+const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../static/apple-touch-icon.png");
+
 /// Minimum seconds between stored rows, so a single wake (which may deliver both
 /// a GetStatus response and a NotifyFullStatus) yields one row, not several.
 const MIN_INSERT_INTERVAL_SECS: i64 = 5;
@@ -149,6 +157,14 @@ async fn main() {
         .route("/shelly", any(ws_handler))
         .route("/api/data", get(api_data))
         .route("/api/meta", get(api_meta))
+        .route("/api/stats", get(api_stats))
+        // Progressive-web-app assets, so the graph installs to a phone's home
+        // screen and runs full-screen like a native app.
+        .route("/manifest.webmanifest", get(asset_manifest))
+        .route("/sw.js", get(asset_sw))
+        .route("/icon-192.png", get(asset_icon_192))
+        .route("/icon-512.png", get(asset_icon_512))
+        .route("/apple-touch-icon.png", get(asset_apple_icon))
         .with_state(state);
 
     let addr: SocketAddr = format!("{bind}:{port}").parse().expect("bind addr");
@@ -260,6 +276,32 @@ fn process_message(text: &str, state: &AppState) {
 }
 
 // ---------------------------------------------------------------------------
+// Static PWA assets (embedded at compile time).
+// ---------------------------------------------------------------------------
+
+/// Build a response with an explicit content type; browsers refuse to register
+/// a service worker or parse a manifest served as the wrong type.
+fn asset(content_type: &'static str, body: impl Into<axum::body::Body>) -> impl IntoResponse {
+    ([(axum::http::header::CONTENT_TYPE, content_type)], body.into())
+}
+
+async fn asset_manifest() -> impl IntoResponse {
+    asset("application/manifest+json", MANIFEST_JSON)
+}
+async fn asset_sw() -> impl IntoResponse {
+    asset("text/javascript", SERVICE_WORKER_JS)
+}
+async fn asset_icon_192() -> impl IntoResponse {
+    asset("image/png", ICON_192_PNG)
+}
+async fn asset_icon_512() -> impl IntoResponse {
+    asset("image/png", ICON_512_PNG)
+}
+async fn asset_apple_icon() -> impl IntoResponse {
+    asset("image/png", APPLE_TOUCH_ICON_PNG)
+}
+
+// ---------------------------------------------------------------------------
 // HTTP API for the web UI.
 // ---------------------------------------------------------------------------
 
@@ -306,6 +348,49 @@ async fn api_data(State(state): State<AppState>, Query(q): Query<DataQuery>) -> 
     }
 
     Json(json!({ "unit": "F", "t": t, "tempF": temp_f, "hum": hum }))
+}
+
+/// High/low temperature and humidity over each summary window.
+///
+/// Windows that contain no readings yet report nulls rather than being omitted,
+/// so the UI can list them consistently and just grey out the empty ones.
+async fn api_stats(State(state): State<AppState>) -> impl IntoResponse {
+    const WINDOWS: [(&str, f64); 3] = [("24h", 1.0), ("48h", 2.0), ("7d", 7.0)];
+
+    let now = now_unix();
+    let db = state.db.lock().unwrap();
+
+    let windows: Vec<Value> = WINDOWS
+        .iter()
+        .map(|(key, days)| {
+            let cutoff = now - (days * 86400.0) as i64;
+            let row: (Option<f64>, Option<f64>, Option<f64>, Option<f64>, i64) = db
+                .query_row(
+                    "SELECT MIN(temp_c), MAX(temp_c), MIN(humidity), MAX(humidity), COUNT(*)
+                     FROM readings WHERE ts >= ?1",
+                    [cutoff],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .unwrap_or((None, None, None, None, 0));
+
+            let (t_min, t_max, h_min, h_max, count) = row;
+            // Convert °C to °F and round to one decimal, matching the graph.
+            let f = |c: Option<f64>| c.map(|c| ((c * 9.0 / 5.0 + 32.0) * 10.0).round() / 10.0);
+            let rh = |v: Option<f64>| v.map(|v| (v * 10.0).round() / 10.0);
+
+            json!({
+                "key": key,
+                "days": days,
+                "count": count,
+                "tempMinF": f(t_min),
+                "tempMaxF": f(t_max),
+                "humMin": rh(h_min),
+                "humMax": rh(h_max),
+            })
+        })
+        .collect();
+
+    Json(json!({ "unit": "F", "windows": windows }))
 }
 
 /// Report the span of stored data and the default window to show, per the

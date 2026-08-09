@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  orchidd launchd job.
+
+  Placeholders (@BIN@, @DB@, @LOG@, @PORT@) are substituted by
+  deploy/install-macos.sh; this file is the template, not the installed copy.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jwmurray.orchidd</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@BIN@</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ORCHIDD_DB</key>
+        <string>@DB@</string>
+        <key>ORCHIDD_PORT</key>
+        <string>@PORT@</string>
+    </dict>
+
+    <!-- Start at load (login for an agent, boot for a daemon) and restart if it
+         ever exits, so a crash or an OS update never silently ends collection. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't spin if it fails immediately at startup (e.g. port in use). -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>@LOG@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG@</string>
+
+    <key>WorkingDirectory</key>
+    <string>@DATADIR@</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

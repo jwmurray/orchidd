@@ -2,8 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>orchidd — Temperature &amp; Humidity</title>
+
+<!-- Installable web app: added to the iPhone Home Screen it launches full-screen
+     with its own icon, no browser chrome. -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="icon" href="/icon-192.png" />
+<meta name="theme-color" content="#f5f7fa" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0e1116" media="(prefers-color-scheme: dark)" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="orchidd" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
 <style>
   /* Light theme is the default. */
   :root {
@@ -18,9 +29,14 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%; }
+  /* Respect the notch/home indicator when launched as a Home Screen app. */
   header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-    padding: 14px 20px; border-bottom: 1px solid var(--border); }
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    padding-top: calc(14px + env(safe-area-inset-top));
+    padding-left: calc(20px + env(safe-area-inset-left));
+    padding-right: calc(20px + env(safe-area-inset-right)); }
   h1 { font-size: 16px; margin: 0; font-weight: 600; }
   .now { color: var(--muted); font-size: 13px; }
   .now .t { color: var(--temp); font-weight: 600; }
@@ -31,10 +47,13 @@
     border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
     font-size: 14px; cursor: pointer; }
   .toggle:hover { border-color: var(--grid); }
-  main { padding: 16px 20px; }
+  main { padding: 16px 20px;
+    padding-left: calc(20px + env(safe-area-inset-left));
+    padding-right: calc(20px + env(safe-area-inset-right));
+    padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
   .chartwrap { position: relative; background: var(--panel); border: 1px solid var(--border);
     border-radius: 10px; padding: 10px; }
-  canvas { width: 100%; height: 62vh; display: block; }
+  canvas { width: 100%; height: 62vh; display: block; touch-action: pan-y; }
   .legend { display: flex; gap: 18px; padding: 8px 4px 2px; color: var(--muted); }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
@@ -42,6 +61,24 @@
     border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px;
     white-space: nowrap; opacity: 0; transition: opacity .05s; }
   .empty { color: var(--muted); padding: 40px; text-align: center; }
+  /* Connectivity / session banner. Hidden unless something needs saying. */
+  #banner { display: none; margin: 0 0 12px; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--muted);
+    font-size: 13px; }
+  #banner[data-show] { display: block; }
+  #banner button { margin-left: 8px; font: inherit; color: var(--hum);
+    background: none; border: none; padding: 0; text-decoration: underline; cursor: pointer; }
+  /* Phone layout: the header wraps to two lines and the chart gets more height. */
+  @media (max-width: 560px) {
+    header { gap: 10px 14px; padding: 12px 14px;
+      padding-top: calc(12px + env(safe-area-inset-top)); }
+    h1 { font-size: 15px; }
+    .spacer { flex-basis: 100%; height: 0; }
+    main { padding: 12px 14px; }
+    canvas { height: 66vh; }
+    .legend { flex-wrap: wrap; gap: 10px 14px; font-size: 12px; }
+    #count { margin-left: 0 !important; }
+  }
 </style>
 </head>
 <body>
@@ -53,8 +90,18 @@
   <label>Show last
     <select id="days"></select>
   </label>
+  <label>Hi/Lo
+    <select id="stats">
+      <option value="off">Off</option>
+      <option value="24h">24 hours</option>
+      <option value="48h">48 hours</option>
+      <option value="7d">7 days</option>
+      <option value="all">All three</option>
+    </select>
+  </label>
 </header>
 <main>
+  <div id="banner"></div>
   <div class="chartwrap">
     <canvas id="chart"></canvas>
     <div id="tip"></div>
@@ -79,22 +126,74 @@ function refreshColors() {
 }
 refreshColors();
 
-// ---- theme (default light; toggle persisted in localStorage) --------------
+// ---- preferences ----------------------------------------------------------
+// Stored in localStorage, which is per-browser and per-device by definition:
+// Safari on the iPhone, Chrome on the iMac and Safari on the laptop each keep
+// their own theme, time window and hi/lo choice. Nothing is shared server-side.
+function prefGet(key, fallback) {
+  try { const v = localStorage.getItem('orchidd-' + key); return v === null ? fallback : v; }
+  catch (e) { return fallback; }
+}
+function prefSet(key, value) {
+  try { localStorage.setItem('orchidd-' + key, String(value)); } catch (e) {}
+}
+
+// ---- theme (default light; toggle persisted per browser) ------------------
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;
-  try { localStorage.setItem('orchidd-theme', t); } catch (e) {}
+  prefSet('theme', t);
   $('theme').textContent = t === 'dark' ? 'Light' : 'Dark';
   refreshColors();
   draw();
 }
 
 let data = { t: [], tempF: [], hum: [] };
+let stats = null;                              // /api/stats payload
 let selectedDays = 7;
+let statsMode = prefGet('stats', '24h');       // off | 24h | 48h | 7d | all
 let hover = null; // index of hovered point
 
 // ---- fetch helpers --------------------------------------------------------
+// Three different failures look identical to a naive `await fetch(...).json()`,
+// and each needs a different message:
+//   * no network            -> show last cached data, say it's stale
+//   * Access session expired -> Cloudflare answers with an HTML login page
+//                               (or redirects to one); offer a sign-in tap
+//   * server down            -> same as no network from the app's point of view
+class SessionExpired extends Error {}
+
+function setBanner(html) {
+  const b = $('banner');
+  if (!html) { b.removeAttribute('data-show'); b.innerHTML = ''; return; }
+  b.innerHTML = html;
+  b.setAttribute('data-show', '');
+}
+
+async function getJSON(path) {
+  const res = await fetch(path, { cache: 'no-store' });
+  const type = res.headers.get('content-type') || '';
+  // A redirect to the Access login, or an HTML body where JSON belongs, both
+  // mean "you are no longer signed in" rather than "the server is broken".
+  if (res.redirected || !type.includes('application/json')) throw new SessionExpired();
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+function reportError(err) {
+  if (err instanceof SessionExpired) {
+    setBanner('Session expired. <button onclick="location.reload()">Sign in again</button>');
+  } else {
+    const when = lastLoaded
+      ? 'Showing data from ' + lastLoaded.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : 'No connection to orchidd';
+    setBanner(`Offline — ${when}. <button onclick="refresh()">Retry</button>`);
+  }
+}
+
+let lastLoaded = null;
+
 async function loadMeta() {
-  const m = await (await fetch('/api/meta')).json();
+  const m = await getJSON('/api/meta');
   const sel = $('days');
   sel.innerHTML = '';
   const max = m.maxDays || 7;
@@ -102,6 +201,7 @@ async function loadMeta() {
   const opts = [
     { label: '1 hour', days: 1 / 24 },
     { label: '2 hours', days: 2 / 24 },
+    { label: '4 hours', days: 4 / 24 },
     { label: '12 hours', days: 0.5 },
   ];
   for (let d = 1; d <= max; d++) {
@@ -112,13 +212,32 @@ async function loadMeta() {
     el.value = String(o.days); el.textContent = o.label;
     sel.appendChild(el);
   }
-  selectedDays = m.defaultDays || 7;
+
+  // Remembered window wins over the server's suggestion, but only if it is
+  // still offered — the day-length options grow as history accumulates, so a
+  // saved "5 days" must not silently select nothing after a database reset.
+  const saved = prefGet('days', null);
+  const available = [...sel.options].map((o) => o.value);
+  selectedDays = saved !== null && available.includes(saved)
+    ? +saved
+    : (m.defaultDays || 7);
   sel.value = String(selectedDays);
-  sel.onchange = () => { selectedDays = +sel.value; loadData(); };
+  sel.onchange = () => {
+    selectedDays = +sel.value;
+    prefSet('days', sel.value);
+    loadData();
+  };
 }
 
 async function loadData() {
-  data = await (await fetch('/api/data?days=' + selectedDays)).json();
+  try {
+    data = await getJSON('/api/data?days=' + selectedDays);
+    lastLoaded = new Date();
+    setBanner(null);
+  } catch (err) {
+    reportError(err);
+    return;
+  }
   const n = data.t.length;
   $('empty').hidden = n > 0;
   $('count').textContent = n ? n + ' points' : '';
@@ -131,6 +250,37 @@ async function loadData() {
     $('now').textContent = '—';
   }
   draw();
+}
+
+// ---- hi/lo summary lines --------------------------------------------------
+// Each window gets its own dash pattern so three overlapping pairs stay
+// tellable apart; colour still encodes the metric, matching the series.
+const STAT_WINDOWS = {
+  '24h': { label: '24h', dash: [7, 4] },
+  '48h': { label: '48h', dash: [2, 3] },
+  '7d':  { label: '7d',  dash: [11, 3, 2, 3] },
+};
+
+async function loadStats() {
+  try { stats = await getJSON('/api/stats'); } catch (e) { stats = null; }
+}
+
+/// The windows currently selected for display, newest-window-first.
+function activeStatWindows() {
+  if (!stats || statsMode === 'off') return [];
+  const keys = statsMode === 'all' ? ['24h', '48h', '7d'] : [statsMode];
+  return stats.windows.filter((w) => keys.includes(w.key) && w.count > 0);
+}
+
+/// Every hi/lo value being drawn, so the axes can be scaled to include them —
+/// otherwise a 7-day high sits off-screen while you are viewing the last hour.
+function statValues(windows) {
+  const temps = [], hums = [];
+  for (const w of windows) {
+    if (w.tempMinF != null) temps.push(w.tempMinF, w.tempMaxF);
+    if (w.humMin != null) hums.push(w.humMin, w.humMax);
+  }
+  return { temps, hums };
 }
 
 // ---- scale helpers --------------------------------------------------------
@@ -212,8 +362,11 @@ function draw() {
   const tSpan = Math.max(1, t1 - t0);
   // Temperature drives the gridlines (10% padding, rounded to clean values);
   // humidity is then fitted onto those SAME lines with its own round step.
-  const [tLoPad, tHiPad] = paddedRange(data.tempF, 4);   // 10% pad, >= 4 °F tall
-  const [hLoPad, hHiPad] = paddedRange(data.hum, 8);     // >= 8 %RH tall
+  // Hi/lo lines are part of the picture, so they participate in the range.
+  const statWins = activeStatWindows();
+  const sv = statValues(statWins);
+  const [tLoPad, tHiPad] = paddedRange(data.tempF.concat(sv.temps), 4); // 10% pad, >= 4 °F
+  const [hLoPad, hHiPad] = paddedRange(data.hum.concat(sv.hums), 8);    // >= 8 %RH tall
   // Fewer target gridlines => humidity fits the shared lines with less empty
   // headroom (each temperature line still gets a matching humidity value).
   const tAxis = niceAxisCover(tLoPad, tHiPad, 5);
@@ -249,6 +402,9 @@ function draw() {
     ctx.fillText(fmtTime(tt, tSpan), xx, padT + H + 6);
   }
 
+  // hi/lo reference lines, drawn under the series so live data stays dominant
+  drawStatLines(statWins, yT, yH, padL, W, padT, H);
+
   // series
   drawLine(data.t, data.tempF, yT, TEMP);
   drawLine(data.t, data.hum, yH, HUM);
@@ -282,6 +438,63 @@ function drawLine(ts, vs, yf, color) {
   }
   ctx.stroke();
 }
+/// Draw the hi/lo reference lines with an inline label on each.
+///
+/// Temperature labels hug the left of the plot and humidity labels the right,
+/// matching the side each metric's axis is on. When several windows are shown
+/// at once their labels are staggered horizontally so equal values don't stack
+/// on top of each other.
+function drawStatLines(windows, yT, yH, padL, W, padT, H) {
+  if (!windows.length) return;
+  const panel = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim();
+
+  ctx.save();
+  ctx.font = '10px sans-serif';
+  ctx.textBaseline = 'bottom';
+  ctx.lineWidth = 1.25;
+
+  const line = (value, yf, color, text, side, slot) => {
+    if (value == null) return;
+    const y = yf(value);
+    if (y < padT - 0.5 || y > padT + H + 0.5) return; // outside the plot
+
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(padL + W, y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    const w = ctx.measureText(text).width;
+    const stagger = Math.min(slot * (w + 16), Math.max(0, W - w - 12));
+    const x = side === 'left'
+      ? padL + 5 + stagger
+      : padL + W - 5 - stagger - w;
+    // A chip of panel colour keeps the label readable where it crosses a
+    // gridline or the series itself.
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = panel;
+    ctx.fillRect(x - 3, y - 12, w + 6, 12);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    ctx.textAlign = 'left';
+    ctx.fillText(text, x, y - 1.5);
+  };
+
+  windows.forEach((w, i) => {
+    const tag = STAT_WINDOWS[w.key].label;
+    ctx.setLineDash(STAT_WINDOWS[w.key].dash);
+    line(w.tempMaxF, yT, TEMP, `${tag} hi ${w.tempMaxF?.toFixed(1)}°`, 'left', i);
+    line(w.tempMinF, yT, TEMP, `${tag} lo ${w.tempMinF?.toFixed(1)}°`, 'left', i);
+    line(w.humMax, yH, HUM, `${tag} hi ${w.humMax?.toFixed(1)}%`, 'right', i);
+    line(w.humMin, yH, HUM, `${tag} lo ${w.humMin?.toFixed(1)}%`, 'right', i);
+  });
+
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 function dot(px, py, color) {
   ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, 3.5, 0, 7); ctx.fill();
 }
@@ -295,10 +508,12 @@ function fmtTime(ms, span) {
 }
 
 // ---- hover / tooltip ------------------------------------------------------
-canvas.addEventListener('mousemove', (e) => {
+// Driven by both mouse and touch: on a phone, dragging along the chart scrubs
+// the readout the same way hovering does on a desktop.
+function showTipAt(clientX, clientY) {
   if (!geo || data.t.length === 0) return;
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
+  const mx = clientX - rect.left;
   // nearest point by x
   const targetT = geo.t0 + (mx - geo.padL) / geo.W * geo.tSpan;
   let best = 0, bestd = Infinity;
@@ -315,23 +530,68 @@ canvas.addEventListener('mousemove', (e) => {
   tip.style.opacity = 1;
   let tx = geo.x(data.t[best]) + 12;
   if (tx + 150 > canvas.clientWidth) tx = geo.x(data.t[best]) - 150;
-  tip.style.left = tx + 'px';
-  tip.style.top = (e.clientY - rect.top - 10) + 'px';
+  tip.style.left = Math.max(0, tx) + 'px';
+  tip.style.top = (clientY - rect.top - 10) + 'px';
   draw();
-});
-canvas.addEventListener('mouseleave', () => { hover = null; $('tip').style.opacity = 0; draw(); });
+}
+
+function hideTip() { hover = null; $('tip').style.opacity = 0; draw(); }
+
+canvas.addEventListener('mousemove', (e) => showTipAt(e.clientX, e.clientY));
+canvas.addEventListener('mouseleave', hideTip);
+
+canvas.addEventListener('touchstart', (e) => {
+  const t = e.touches[0];
+  if (t) showTipAt(t.clientX, t.clientY);
+}, { passive: true });
+canvas.addEventListener('touchmove', (e) => {
+  const t = e.touches[0];
+  if (t) showTipAt(t.clientX, t.clientY);
+}, { passive: true });
+canvas.addEventListener('touchend', hideTip);
 
 window.addEventListener('resize', draw);
 
 // ---- boot + auto-refresh --------------------------------------------------
+// Readings and hi/lo summaries are fetched together so the lines never lag a
+// refresh cycle behind the series they annotate.
+async function refresh() {
+  await Promise.all([loadData(), loadStats()]);
+  draw();
+}
+
 (async function () {
   const saved = (() => { try { return localStorage.getItem('orchidd-theme'); } catch (e) { return null; } })();
   applyTheme(saved === 'dark' ? 'dark' : 'light');   // default light
   $('theme').onclick = () =>
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-  await loadMeta();
-  await loadData();
-  setInterval(loadData, 60000); // refresh every minute
+
+  const statsSel = $('stats');
+  const STATS_CHOICES = ['off', '24h', '48h', '7d', 'all'];
+  if (!STATS_CHOICES.includes(statsMode)) statsMode = '24h';
+  statsSel.value = statsMode;
+  statsSel.onchange = () => {
+    statsMode = statsSel.value;
+    prefSet('stats', statsMode);
+    draw();
+  };
+
+  // Meta only shapes the window selector; if it fails, loadData still reports
+  // the real problem and the chart falls back to the default 7-day window.
+  try { await loadMeta(); } catch (e) { /* reported by loadData */ }
+  await refresh();
+
+  setInterval(refresh, 60000); // refresh every minute
+
+  // A Home Screen app is usually resumed from the background rather than
+  // loaded fresh, so refresh on resume instead of showing a stale graph.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refresh();
+  });
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
 })();
 </script>
 </body>
