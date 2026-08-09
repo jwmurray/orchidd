@@ -1,0 +1,10 @@
+# Rust build artifacts
+/target
+
+# Runtime data & logs
+orchidd.db
+orchidd.db-shm
+orchidd.db-wal
+*.db
+orchidd.out
+nohup.out

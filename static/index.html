@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>orchidd — Temperature &amp; Humidity</title>
+<style>
+  /* Light theme is the default. */
+  :root {
+    --bg: #f5f7fa; --panel: #ffffff; --border: #e2e6eb; --grid: #c2cad6;
+    --text: #1b2430; --muted: #5b6675; --temp: #d83a2f; --hum: #1668c9;
+    --tipbg: #1b2430; --tiptext: #ffffff;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --panel: #161b22; --border: #2a313c; --grid: #495468;
+    --text: #c9d1d9; --muted: #8b949e; --temp: #ff6b4a; --hum: #4aa3ff;
+    --tipbg: #0b0e12; --tiptext: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border); }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .now { color: var(--muted); font-size: 13px; }
+  .now .t { color: var(--temp); font-weight: 600; }
+  .now .h { color: var(--hum); font-weight: 600; }
+  .spacer { flex: 1; }
+  label { color: var(--muted); }
+  select, .toggle { background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
+    font-size: 14px; cursor: pointer; }
+  .toggle:hover { border-color: var(--grid); }
+  main { padding: 16px 20px; }
+  .chartwrap { position: relative; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px; }
+  canvas { width: 100%; height: 62vh; display: block; }
+  .legend { display: flex; gap: 18px; padding: 8px 4px 2px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+  #tip { position: absolute; pointer-events: none; background: var(--tipbg); color: var(--tiptext);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px;
+    white-space: nowrap; opacity: 0; transition: opacity .05s; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌡️ orchidd</h1>
+  <span class="now" id="now">—</span>
+  <span class="spacer"></span>
+  <button id="theme" class="toggle" title="Toggle light/dark">Dark</button>
+  <label>Show last
+    <select id="days"></select>
+  </label>
+</header>
+<main>
+  <div class="chartwrap">
+    <canvas id="chart"></canvas>
+    <div id="tip"></div>
+  </div>
+  <div class="legend">
+    <span><i class="swatch" style="background:var(--temp)"></i> Temperature (°F)</span>
+    <span><i class="swatch" style="background:var(--hum)"></i> Humidity (%RH)</span>
+    <span id="count" style="margin-left:auto"></span>
+  </div>
+  <div class="empty" id="empty" hidden>No data yet — waiting for the first report from the sensor.</div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let TEMP, HUM, GRID, MUTED;
+function refreshColors() {
+  const cs = getComputedStyle(document.documentElement);
+  TEMP = cs.getPropertyValue('--temp').trim();
+  HUM  = cs.getPropertyValue('--hum').trim();
+  GRID = cs.getPropertyValue('--grid').trim();
+  MUTED = cs.getPropertyValue('--muted').trim();
+}
+refreshColors();
+
+// ---- theme (default light; toggle persisted in localStorage) --------------
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('orchidd-theme', t); } catch (e) {}
+  $('theme').textContent = t === 'dark' ? 'Light' : 'Dark';
+  refreshColors();
+  draw();
+}
+
+let data = { t: [], tempF: [], hum: [] };
+let selectedDays = 7;
+let hover = null; // index of hovered point
+
+// ---- fetch helpers --------------------------------------------------------
+async function loadMeta() {
+  const m = await (await fetch('/api/meta')).json();
+  const sel = $('days');
+  sel.innerHTML = '';
+  const max = m.maxDays || 7;
+  // Sub-day windows first, then whole days up to the max.
+  const opts = [
+    { label: '1 hour', days: 1 / 24 },
+    { label: '2 hours', days: 2 / 24 },
+    { label: '12 hours', days: 0.5 },
+  ];
+  for (let d = 1; d <= max; d++) {
+    opts.push({ label: d === 1 ? '24 hours' : d + ' days', days: d });
+  }
+  for (const o of opts) {
+    const el = document.createElement('option');
+    el.value = String(o.days); el.textContent = o.label;
+    sel.appendChild(el);
+  }
+  selectedDays = m.defaultDays || 7;
+  sel.value = String(selectedDays);
+  sel.onchange = () => { selectedDays = +sel.value; loadData(); };
+}
+
+async function loadData() {
+  data = await (await fetch('/api/data?days=' + selectedDays)).json();
+  const n = data.t.length;
+  $('empty').hidden = n > 0;
+  $('count').textContent = n ? n + ' points' : '';
+  if (n) {
+    const i = n - 1;
+    $('now').innerHTML =
+      `now <span class="t">${data.tempF[i].toFixed(1)}°F</span> · ` +
+      `<span class="h">${data.hum[i].toFixed(1)}%</span>`;
+  } else {
+    $('now').textContent = '—';
+  }
+  draw();
+}
+
+// ---- scale helpers --------------------------------------------------------
+// Range padded by 10% beyond the data extent, per requirement, but never
+// tighter than `minSpan` so near-flat data doesn't produce a weird micro-range.
+function paddedRange(arr, minSpan) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of arr) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (!isFinite(lo)) return [0, minSpan || 1];
+  const range = hi - lo;
+  const pad = range > 0 ? range * 0.10 : Math.max((minSpan || 2) / 2, Math.abs(hi) * 0.05);
+  let a = lo - pad, b = hi + pad;
+  if (minSpan && b - a < minSpan) { const m = (a + b) / 2; a = m - minSpan / 2; b = m + minSpan / 2; }
+  return [a, b];
+}
+
+// Nice axis covering [lo,hi] with round min/max/step (~targetTicks intervals).
+// Temperature uses this to pick the shared gridlines.
+function niceAxisCover(lo, hi, targetTicks) {
+  const step = niceNum(((hi - lo) || 1) / Math.max(1, targetTicks), true);
+  const min = Math.floor(lo / step) * step;
+  const max = Math.ceil(hi / step) * step;
+  const count = Math.max(1, Math.round((max - min) / step));
+  return { min, max, step, count };
+}
+
+// Fit [lo,hi] into EXACTLY k intervals using the smallest nice step that covers
+// the range from a nice-aligned min — so humidity's round labels land on the
+// SAME horizontal lines the temperature axis already defined.
+function fitToCount(lo, hi, k) {
+  let step = niceNum(((hi - lo) || 1) / k, true) || 1;
+  for (let it = 0; it < 40; it++) {
+    const min = Math.floor(lo / step) * step;
+    if (min + k * step >= hi - 1e-9) return { min, max: min + k * step, step, count: k };
+    step = niceNumNext(step);
+  }
+  const min = Math.floor(lo / step) * step;
+  return { min, max: min + k * step, step, count: k };
+}
+
+function niceNum(x, round) {
+  x = Math.abs(x) || 1;
+  const exp = Math.floor(Math.log10(x));
+  const f = x / Math.pow(10, exp);
+  const nf = round ? (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10)
+                   : (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10);
+  return nf * Math.pow(10, exp);
+}
+function niceNumNext(step) {          // next nice number up: 1→2→5→10…
+  const exp = Math.floor(Math.log10(step) + 1e-9);
+  const f = Math.round(step / Math.pow(10, exp));
+  const nf = f < 2 ? 2 : f < 5 ? 5 : 10;
+  return nf * Math.pow(10, exp);
+}
+function decimalsForStep(step) { return step >= 1 ? 0 : step >= 0.1 ? 1 : 2; }
+
+// ---- drawing --------------------------------------------------------------
+const canvas = $('chart');
+const ctx = canvas.getContext('2d');
+let geo = null; // saved geometry for hit-testing
+
+function draw() {
+  refreshColors();
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth, cssH = canvas.clientHeight;
+  canvas.width = cssW * dpr; canvas.height = cssH * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const n = data.t.length;
+  const padL = 52, padR = 52, padT = 12, padB = 28;
+  const W = cssW - padL - padR, H = cssH - padT - padB;
+  if (n === 0 || W <= 0 || H <= 0) { geo = null; return; }
+
+  // Time axis is anchored to the selected window with "now" at the right edge,
+  // so labels show real times even when only a few points exist yet.
+  const t1 = Date.now();
+  const t0 = t1 - selectedDays * 86400 * 1000;
+  const tSpan = Math.max(1, t1 - t0);
+  // Temperature drives the gridlines (10% padding, rounded to clean values);
+  // humidity is then fitted onto those SAME lines with its own round step.
+  const [tLoPad, tHiPad] = paddedRange(data.tempF, 4);   // 10% pad, >= 4 °F tall
+  const [hLoPad, hHiPad] = paddedRange(data.hum, 8);     // >= 8 %RH tall
+  // Fewer target gridlines => humidity fits the shared lines with less empty
+  // headroom (each temperature line still gets a matching humidity value).
+  const tAxis = niceAxisCover(tLoPad, tHiPad, 5);
+  const k = tAxis.count;
+  const hAxis = fitToCount(hLoPad, hHiPad, k);
+  const tDec = decimalsForStep(tAxis.step);
+  const hDec = decimalsForStep(hAxis.step);
+
+  const x = (t) => padL + (t - t0) / tSpan * W;
+  const yT = (v) => padT + (1 - (v - tAxis.min) / (tAxis.max - tAxis.min)) * H;
+  const yH = (v) => padT + (1 - (v - hAxis.min) / (hAxis.max - hAxis.min)) * H;
+  geo = { padL, padT, W, H, x, t0, tSpan };
+
+  // Shared horizontal gridlines: one per interval, temp label left, humidity right.
+  ctx.font = '11px sans-serif';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= k; i++) {
+    const yy = padT + H - (H * i / k);
+    ctx.strokeStyle = GRID; ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(padL + W, yy); ctx.stroke();
+    ctx.fillStyle = TEMP; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText((tAxis.min + i * tAxis.step).toFixed(tDec) + '°', padL - 6, yy);
+    ctx.fillStyle = HUM; ctx.textAlign = 'left';
+    ctx.fillText((hAxis.min + i * hAxis.step).toFixed(hDec) + '%', padL + W + 6, yy);
+  }
+
+  // x-axis time labels
+  ctx.fillStyle = MUTED; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const labels = 6;
+  for (let i = 0; i <= labels; i++) {
+    const tt = t0 + tSpan * i / labels;
+    const xx = padL + W * i / labels;
+    ctx.fillText(fmtTime(tt, tSpan), xx, padT + H + 6);
+  }
+
+  // series
+  drawLine(data.t, data.tempF, yT, TEMP);
+  drawLine(data.t, data.hum, yH, HUM);
+
+  // Mark the most recent sample (all samples when very sparse) so a lone or
+  // just-started reading is always visible.
+  const markIdx = n <= 2 ? [...Array(n).keys()] : [n - 1];
+  for (const i of markIdx) {
+    const px = x(data.t[i]);
+    dot(px, yT(data.tempF[i]), TEMP);
+    dot(px, yH(data.hum[i]), HUM);
+  }
+
+  // hover marker
+  if (hover != null && hover >= 0 && hover < n) {
+    const hx = x(data.t[hover]);
+    ctx.strokeStyle = MUTED; ctx.globalAlpha = 0.5;
+    ctx.beginPath(); ctx.moveTo(hx, padT); ctx.lineTo(hx, padT + H); ctx.stroke();
+    ctx.globalAlpha = 1;
+    dot(hx, yT(data.tempF[hover]), TEMP);
+    dot(hx, yH(data.hum[hover]), HUM);
+  }
+}
+
+function drawLine(ts, vs, yf, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = 1.75; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < ts.length; i++) {
+    const px = geo.x(ts[i]), py = yf(vs[i]);
+    i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+  }
+  ctx.stroke();
+}
+function dot(px, py, color) {
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, 3.5, 0, 7); ctx.fill();
+}
+
+function fmtTime(ms, span) {
+  const d = new Date(ms);
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (span > 36 * 3600 * 1000) // more than ~1.5 days: show date
+    return d.toLocaleDateString([], { month: 'numeric', day: 'numeric' });
+  return hm;
+}
+
+// ---- hover / tooltip ------------------------------------------------------
+canvas.addEventListener('mousemove', (e) => {
+  if (!geo || data.t.length === 0) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  // nearest point by x
+  const targetT = geo.t0 + (mx - geo.padL) / geo.W * geo.tSpan;
+  let best = 0, bestd = Infinity;
+  for (let i = 0; i < data.t.length; i++) {
+    const dd = Math.abs(data.t[i] - targetT);
+    if (dd < bestd) { bestd = dd; best = i; }
+  }
+  hover = best;
+  const tip = $('tip');
+  tip.innerHTML =
+    `${new Date(data.t[best]).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}<br>` +
+    `<span style="color:${TEMP}">${data.tempF[best].toFixed(1)}°F</span> · ` +
+    `<span style="color:${HUM}">${data.hum[best].toFixed(1)}%</span>`;
+  tip.style.opacity = 1;
+  let tx = geo.x(data.t[best]) + 12;
+  if (tx + 150 > canvas.clientWidth) tx = geo.x(data.t[best]) - 150;
+  tip.style.left = tx + 'px';
+  tip.style.top = (e.clientY - rect.top - 10) + 'px';
+  draw();
+});
+canvas.addEventListener('mouseleave', () => { hover = null; $('tip').style.opacity = 0; draw(); });
+
+window.addEventListener('resize', draw);
+
+// ---- boot + auto-refresh --------------------------------------------------
+(async function () {
+  const saved = (() => { try { return localStorage.getItem('orchidd-theme'); } catch (e) { return null; } })();
+  applyTheme(saved === 'dark' ? 'dark' : 'light');   // default light
+  $('theme').onclick = () =>
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+  await loadMeta();
+  await loadData();
+  setInterval(loadData, 60000); // refresh every minute
+})();
+</script>
+</body>
+</html>
