@@ -1,0 +1,23 @@
+# cloudflared tunnel config for orchidd.
+#
+# Copy to ~/.cloudflared/config.yml (macOS/Linux user install) or
+# /etc/cloudflared/config.yml (system install), then edit the three marked
+# values. Create the tunnel and DNS route first:
+#
+#   cloudflared tunnel login
+#   cloudflared tunnel create orchidd
+#   cloudflared tunnel route dns orchidd orchid.example.com
+#
+# `cloudflared tunnel create` prints the tunnel UUID and writes the matching
+# credentials JSON; use both below.
+
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /Users/YOUR_USER/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  # The public hostname you routed above -> the local orchidd port.
+  - hostname: orchid.example.com
+    service: http://localhost:8000
+
+  # Required: every ingress list must end with a catch-all.
+  - service: http_status:404

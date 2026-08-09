@@ -1,0 +1,38 @@
+[Unit]
+# orchidd systemd unit. Placeholders are substituted by deploy/install-linux.sh.
+Description=orchidd — Shelly H&T temperature/humidity collector and graph server
+Documentation=https://github.com/jwmurray/orchidd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@BIN@
+Restart=always
+RestartSec=5
+
+Environment=ORCHIDD_DB=@DB@
+Environment=ORCHIDD_PORT=@PORT@
+WorkingDirectory=@DATADIR@
+
+User=@USER@
+Group=@GROUP@
+
+# The service only needs to listen on a port, read its database and run a couple
+# of read-only network lookups, so everything else is taken away from it.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=@DATADIR@
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
