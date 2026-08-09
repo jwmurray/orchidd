@@ -51,7 +51,8 @@ $SUDO mkdir -p "$(dirname "$BIN")" "$DATADIR" "$(dirname "$LOG")" "$(dirname "$P
 $SUDO cp target/release/orchidd "$BIN"
 
 # Stop an existing instance before swapping the plist, so the port is free.
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+# Querying the system domain requires root, so these go through $SUDO too.
+if $SUDO launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
     echo "==> Stopping running service"
     $SUDO launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 fi
@@ -75,15 +76,15 @@ $SUDO launchctl bootstrap "$DOMAIN" "$PLIST"
 $SUDO launchctl enable "$DOMAIN/$LABEL"
 
 sleep 2
-if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+if $SUDO launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
     echo
     echo "orchidd is running."
     echo "  database: $DB"
     echo "  log:      $LOG"
-    echo "  status:   launchctl print $DOMAIN/$LABEL"
+    echo "  status:   ${SUDO:+sudo }launchctl print $DOMAIN/$LABEL"
     echo "  stop:     ${SUDO:+sudo }launchctl bootout $DOMAIN/$LABEL"
     echo
-    tail -n 6 "$LOG" 2>/dev/null || true
+    $SUDO tail -n 6 "$LOG" 2>/dev/null || true
 else
     echo "error: service did not start; check $LOG" >&2
     exit 1
