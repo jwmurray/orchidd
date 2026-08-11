@@ -404,10 +404,13 @@ function draw() {
   ctx.clearRect(0, 0, cssW, cssH);
 
   const n = data.t.length;
-  const wspanDays = ((win || resolveRange()).t1 - (win || resolveRange()).t0) / 86400000;
+  const wv = win || resolveRange();
+  const wspanDays = (wv.t1 - wv.t0) / 86400000;
+  const crossesDay = new Date(wv.t0).toDateString() !== new Date(wv.t1).toDateString();
   const padL = 56, padR = 56, padT = 12;
-  // Two-line x labels (time + date) on long ranges need a taller bottom band.
-  const padB = wspanDays > 1.5 ? 46 : 30;
+  // Two-line x labels (time + date) need a taller bottom band — always on
+  // long ranges, and on short ones whenever the window crosses midnight.
+  const padB = wspanDays > 1.5 || crossesDay ? 46 : 30;
   const W = cssW - padL - padR, H = cssH - padT - padB;
   if (n === 0 || W <= 0 || H <= 0) { geo = null; return; }
 
@@ -450,12 +453,15 @@ function draw() {
   // x-axis: each tick snaps to the nearest half hour so the label reads a
   // clean clock time, and a vertical gridline (same weight as the horizontal
   // ones) marks exactly where that time falls. Ranges past ~1.5 days add the
-  // date on a second line since the times alone would be ambiguous.
+  // date on a second line since the times alone would be ambiguous; short
+  // ranges add it only on the first tick of a new day, so a midnight
+  // crossing is visible without repeating the date everywhere.
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   const labels = 6;
   const HALF_HOUR = 30 * 60 * 1000;
   const twoLine = tSpan > 36 * 3600 * 1000;
   const drawn = new Set();
+  let prevTickDay = null;
   for (let i = 0; i <= labels; i++) {
     const tt = Math.round((t0 + tSpan * i / labels) / HALF_HOUR) * HALF_HOUR;
     if (tt < t0 || tt > t1 || drawn.has(tt)) continue; // snapped out of range
@@ -466,8 +472,10 @@ function draw() {
     const d = new Date(tt);
     ctx.fillStyle = MUTED;
     ctx.fillText(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), xx, padT + H + 6);
-    if (twoLine)
+    const newDay = prevTickDay !== null && d.toDateString() !== prevTickDay;
+    if (twoLine || newDay)
       ctx.fillText(d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }), xx, padT + H + 22);
+    prevTickDay = d.toDateString();
   }
 
   // hi/lo reference lines, drawn under the series so live data stays dominant
