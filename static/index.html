@@ -46,6 +46,9 @@
   select, .toggle { background: var(--panel); color: var(--text);
     border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
     font-size: 14px; cursor: pointer; }
+  #customDays { background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
+    font-size: 14px; width: 82px; }
   .toggle:hover { border-color: var(--grid); }
   main { padding: 16px 20px;
     padding-left: calc(20px + env(safe-area-inset-left));
@@ -87,18 +90,10 @@
   <span class="now" id="now">—</span>
   <span class="spacer"></span>
   <button id="theme" class="toggle" title="Toggle light/dark">Dark</button>
-  <label>Show last
+  <label>Show
     <select id="days"></select>
   </label>
-  <label>Hi/Lo
-    <select id="stats">
-      <option value="off">Off</option>
-      <option value="24h">24 hours</option>
-      <option value="48h">48 hours</option>
-      <option value="7d">7 days</option>
-      <option value="all">All three</option>
-    </select>
-  </label>
+  <input id="customDays" type="number" min="1" max="3650" step="1" placeholder="days" hidden />
 </header>
 <main>
   <div id="banner"></div>
@@ -147,11 +142,36 @@ function applyTheme(t) {
   draw();
 }
 
-let data = { t: [], tempF: [], hum: [] };
-let stats = null;                              // /api/stats payload
-let selectedDays = 7;
-let statsMode = prefGet('stats', '24h');       // off | 24h | 48h | 7d | all
+let data = { t: [], tempF: [], hum: [] };      // points inside the window
+let latest = null;                             // newest reading regardless of window
+// "1", "0.5", "week", "lastweek", "lastmonth" or "custom:180" — resolved to a
+// concrete [t0,t1] by resolveRange() every load so calendar ranges track time.
+let rangeChoice = prefGet('range', null);
+let win = null;                                // resolved { t0, t1 }
 let hover = null; // index of hovered point
+
+// Resolve the current range choice to concrete window bounds. Calendar ranges
+// use local time; weeks start on Sunday.
+function resolveRange() {
+  const now = new Date();
+  const t1 = now.getTime();
+  if (rangeChoice === 'week') {
+    const d = new Date(now); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - d.getDay());
+    return { t0: d.getTime(), t1 };
+  }
+  if (rangeChoice === 'lastweek') {
+    const d = new Date(now); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - d.getDay());
+    return { t0: d.getTime() - 7 * 86400000, t1: d.getTime() };
+  }
+  if (rangeChoice === 'lastmonth') {
+    return { t0: new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime(),
+             t1: new Date(now.getFullYear(), now.getMonth(), 1).getTime() };
+  }
+  const s = String(rangeChoice || '');
+  const days = parseFloat(s.startsWith('custom:') ? s.slice(7) : s);
+  const dd = isFinite(days) && days > 0 ? days : 7;
+  return { t0: t1 - dd * 86400000, t1 };
+}
 
 // ---- fetch helpers --------------------------------------------------------
 // Three different failures look identical to a naive `await fetch(...).json()`,
@@ -197,55 +217,104 @@ async function loadMeta() {
   const sel = $('days');
   sel.innerHTML = '';
   const max = m.maxDays || 7;
-  // Sub-day windows first, then whole days up to the max.
+  // Sub-day windows first, then whole days up to the max, then calendar
+  // ranges and a free-form "go back N days" entry.
   const opts = [
-    { label: '1 hour', days: 1 / 24 },
-    { label: '2 hours', days: 2 / 24 },
-    { label: '4 hours', days: 4 / 24 },
-    { label: '12 hours', days: 0.5 },
+    { label: '1 hour', value: String(1 / 24) },
+    { label: '2 hours', value: String(2 / 24) },
+    { label: '4 hours', value: String(4 / 24) },
+    { label: '12 hours', value: '0.5' },
   ];
   for (let d = 1; d <= max; d++) {
-    opts.push({ label: d === 1 ? '24 hours' : d + ' days', days: d });
+    opts.push({ label: d === 1 ? '24 hours' : d + ' days', value: String(d) });
   }
+  opts.push(
+    { label: 'This week', value: 'week' },
+    { label: 'Last week', value: 'lastweek' },
+    { label: 'Last month', value: 'lastmonth' },
+    { label: 'Custom…', value: 'custom' },
+  );
   for (const o of opts) {
     const el = document.createElement('option');
-    el.value = String(o.days); el.textContent = o.label;
+    el.value = o.value; el.textContent = o.label;
     sel.appendChild(el);
   }
 
-  // Remembered window wins over the server's suggestion, but only if it is
+  // Remembered range wins over the server's suggestion, but only if it is
   // still offered — the day-length options grow as history accumulates, so a
   // saved "5 days" must not silently select nothing after a database reset.
-  const saved = prefGet('days', null);
+  const custom = $('customDays');
+  const saved = prefGet('range', null);
   const available = [...sel.options].map((o) => o.value);
-  selectedDays = saved !== null && available.includes(saved)
-    ? +saved
-    : (m.defaultDays || 7);
-  sel.value = String(selectedDays);
+  if (saved !== null && String(saved).startsWith('custom:')) {
+    rangeChoice = saved;
+    sel.value = 'custom';
+    custom.value = saved.slice(7);
+    custom.hidden = false;
+  } else if (saved !== null && available.includes(saved)) {
+    rangeChoice = saved;
+    sel.value = saved;
+  } else {
+    rangeChoice = String(m.defaultDays || 7);
+    sel.value = rangeChoice;
+  }
+
   sel.onchange = () => {
-    selectedDays = +sel.value;
-    prefSet('days', sel.value);
+    if (sel.value === 'custom') {
+      // Wait for a number; the chart keeps its current range meanwhile.
+      custom.hidden = false;
+      custom.focus();
+      return;
+    }
+    custom.hidden = true;
+    rangeChoice = sel.value;
+    prefSet('range', rangeChoice);
     loadData();
   };
+  const applyCustom = () => {
+    const n = parseFloat(custom.value);
+    if (!isFinite(n) || n <= 0) return;
+    rangeChoice = 'custom:' + n;
+    prefSet('range', rangeChoice);
+    loadData();
+  };
+  custom.onchange = applyCustom;
+  custom.onkeydown = (e) => { if (e.key === 'Enter') applyCustom(); };
 }
 
 async function loadData() {
+  win = resolveRange();
+  // Fetch from the window start to now; calendar windows that end in the past
+  // are cut down client-side so "now" can still show the latest reading.
+  const fetchDays = Math.max((Date.now() - win.t0) / 86400000, 0.01) + 0.01;
+  let raw;
   try {
-    data = await getJSON('/api/data?days=' + selectedDays);
+    raw = await getJSON('/api/data?days=' + fetchDays.toFixed(3));
     lastLoaded = new Date();
     setBanner(null);
   } catch (err) {
     reportError(err);
     return;
   }
+  const m = raw.t.length;
+  latest = m ? { t: raw.t[m - 1], tempF: raw.tempF[m - 1], hum: raw.hum[m - 1] } : null;
+  data = { t: [], tempF: [], hum: [] };
+  for (let i = 0; i < m; i++) {
+    if (raw.t[i] >= win.t0 && raw.t[i] <= win.t1) {
+      data.t.push(raw.t[i]); data.tempF.push(raw.tempF[i]); data.hum.push(raw.hum[i]);
+    }
+  }
   const n = data.t.length;
-  $('empty').hidden = n > 0;
+  const empty = $('empty');
+  empty.hidden = n > 0;
+  if (!n) empty.textContent = latest
+    ? 'No readings in the selected period.'
+    : 'No data yet — waiting for the first report from the sensor.';
   $('count').textContent = n ? n + ' points' : '';
-  if (n) {
-    const i = n - 1;
+  if (latest) {
     $('now').innerHTML =
-      `now <span class="t">${data.tempF[i].toFixed(1)}°F</span> · ` +
-      `<span class="h">${data.hum[i].toFixed(1)}%</span>`;
+      `now <span class="t">${latest.tempF.toFixed(1)}°F</span> · ` +
+      `<span class="h">${latest.hum.toFixed(1)}%</span>`;
   } else {
     $('now').textContent = '—';
   }
@@ -253,34 +322,18 @@ async function loadData() {
 }
 
 // ---- hi/lo summary lines --------------------------------------------------
-// Each window gets its own dash pattern so three overlapping pairs stay
-// tellable apart; colour still encodes the metric, matching the series.
-const STAT_WINDOWS = {
-  '24h': { label: '24h', dash: [7, 4] },
-  '48h': { label: '48h', dash: [2, 3] },
-  '7d':  { label: '7d',  dash: [11, 3, 2, 3] },
-};
-
-async function loadStats() {
-  try { stats = await getJSON('/api/stats'); } catch (e) { stats = null; }
-}
-
-/// The windows currently selected for display, newest-window-first.
-function activeStatWindows() {
-  if (!stats || statsMode === 'off') return [];
-  const keys = statsMode === 'all' ? ['24h', '48h', '7d'] : [statsMode];
-  return stats.windows.filter((w) => keys.includes(w.key) && w.count > 0);
-}
-
-/// Every hi/lo value being drawn, so the axes can be scaled to include them —
-/// otherwise a 7-day high sits off-screen while you are viewing the last hour.
-function statValues(windows) {
-  const temps = [], hums = [];
-  for (const w of windows) {
-    if (w.tempMinF != null) temps.push(w.tempMinF, w.tempMaxF);
-    if (w.humMin != null) hums.push(w.humMin, w.humMax);
+// The hi/lo pair always describes exactly the window on screen, so it is
+// computed from the visible points rather than fetched for fixed windows.
+function windowHiLo() {
+  const n = data.t.length;
+  if (!n) return null;
+  let tMax = -Infinity, tMin = Infinity, hMax = -Infinity, hMin = Infinity;
+  for (let i = 0; i < n; i++) {
+    const tv = data.tempF[i], hv = data.hum[i];
+    if (tv > tMax) tMax = tv; if (tv < tMin) tMin = tv;
+    if (hv > hMax) hMax = hv; if (hv < hMin) hMin = hv;
   }
-  return { temps, hums };
+  return { tMax, tMin, hMax, hMin };
 }
 
 // ---- scale helpers --------------------------------------------------------
@@ -351,24 +404,23 @@ function draw() {
   ctx.clearRect(0, 0, cssW, cssH);
 
   const n = data.t.length;
+  const wspanDays = ((win || resolveRange()).t1 - (win || resolveRange()).t0) / 86400000;
   const padL = 56, padR = 56, padT = 12;
   // Two-line x labels (time + date) on long ranges need a taller bottom band.
-  const padB = selectedDays > 1.5 ? 46 : 30;
+  const padB = wspanDays > 1.5 ? 46 : 30;
   const W = cssW - padL - padR, H = cssH - padT - padB;
   if (n === 0 || W <= 0 || H <= 0) { geo = null; return; }
 
-  // Time axis is anchored to the selected window with "now" at the right edge,
-  // so labels show real times even when only a few points exist yet.
-  const t1 = Date.now();
-  const t0 = t1 - selectedDays * 86400 * 1000;
+  // Time axis is anchored to the resolved window; for trailing ranges that
+  // puts "now" at the right edge even when only a few points exist yet.
+  const w = win || resolveRange();
+  const t0 = w.t0, t1 = w.t1;
   const tSpan = Math.max(1, t1 - t0);
   // Temperature drives the gridlines (10% padding, rounded to clean values);
   // humidity is then fitted onto those SAME lines with its own round step.
-  // Hi/lo lines are part of the picture, so they participate in the range.
-  const statWins = activeStatWindows();
-  const sv = statValues(statWins);
-  const [tLoPad, tHiPad] = paddedRange(data.tempF.concat(sv.temps), 4); // 10% pad, >= 4 °F
-  const [hLoPad, hHiPad] = paddedRange(data.hum.concat(sv.hums), 8);    // >= 8 %RH tall
+  const hiLo = windowHiLo();
+  const [tLoPad, tHiPad] = paddedRange(data.tempF, 4); // 10% pad, >= 4 °F
+  const [hLoPad, hHiPad] = paddedRange(data.hum, 8);   // >= 8 %RH tall
   // Fewer target gridlines => humidity fits the shared lines with less empty
   // headroom (each temperature line still gets a matching humidity value).
   const tAxis = niceAxisCover(tLoPad, tHiPad, 5);
@@ -419,7 +471,7 @@ function draw() {
   }
 
   // hi/lo reference lines, drawn under the series so live data stays dominant
-  drawStatLines(statWins, yT, yH, padL, W, padT, H);
+  drawHiLoLines(hiLo, yT, yH, padL, W, padT, H);
 
   // series
   drawLine(data.t, data.tempF, yT, TEMP);
@@ -454,22 +506,20 @@ function drawLine(ts, vs, yf, color) {
   }
   ctx.stroke();
 }
-/// Draw the hi/lo reference lines with an inline label on each.
-///
-/// Temperature labels hug the left of the plot and humidity labels the right,
-/// matching the side each metric's axis is on. When several windows are shown
-/// at once their labels are staggered horizontally so equal values don't stack
-/// on top of each other.
-function drawStatLines(windows, yT, yH, padL, W, padT, H) {
-  if (!windows.length) return;
+/// Draw the hi/lo reference lines for the visible window, with an inline
+/// label on each. Temperature labels hug the left of the plot and humidity
+/// labels the right, matching the side each metric's axis is on.
+function drawHiLoLines(hl, yT, yH, padL, W, padT, H) {
+  if (!hl) return;
   const panel = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim();
 
   ctx.save();
   ctx.font = '12px sans-serif';
   ctx.textBaseline = 'bottom';
   ctx.lineWidth = 1.25;
+  ctx.setLineDash([7, 4]);
 
-  const line = (value, yf, color, text, side, slot) => {
+  const line = (value, yf, color, text, side) => {
     if (value == null) return;
     const y = yf(value);
     if (y < padT - 0.5 || y > padT + H + 0.5) return; // outside the plot
@@ -483,10 +533,7 @@ function drawStatLines(windows, yT, yH, padL, W, padT, H) {
     ctx.globalAlpha = 1;
 
     const w = ctx.measureText(text).width;
-    const stagger = Math.min(slot * (w + 16), Math.max(0, W - w - 12));
-    const x = side === 'left'
-      ? padL + 5 + stagger
-      : padL + W - 5 - stagger - w;
+    const x = side === 'left' ? padL + 5 : padL + W - 5 - w;
     // A chip of panel colour keeps the label readable where it crosses a
     // gridline or the series itself.
     ctx.globalAlpha = 0.85;
@@ -498,14 +545,10 @@ function drawStatLines(windows, yT, yH, padL, W, padT, H) {
     ctx.fillText(text, x, y - 1.5);
   };
 
-  windows.forEach((w, i) => {
-    const tag = STAT_WINDOWS[w.key].label;
-    ctx.setLineDash(STAT_WINDOWS[w.key].dash);
-    line(w.tempMaxF, yT, TEMP, `${tag} hi ${w.tempMaxF?.toFixed(1)}°`, 'left', i);
-    line(w.tempMinF, yT, TEMP, `${tag} lo ${w.tempMinF?.toFixed(1)}°`, 'left', i);
-    line(w.humMax, yH, HUM, `${tag} hi ${w.humMax?.toFixed(1)}%`, 'right', i);
-    line(w.humMin, yH, HUM, `${tag} lo ${w.humMin?.toFixed(1)}%`, 'right', i);
-  });
+  line(hl.tMax, yT, TEMP, `hi ${hl.tMax.toFixed(1)}°`, 'left');
+  line(hl.tMin, yT, TEMP, `lo ${hl.tMin.toFixed(1)}°`, 'left');
+  line(hl.hMax, yH, HUM, `hi ${hl.hMax.toFixed(1)}%`, 'right');
+  line(hl.hMin, yH, HUM, `lo ${hl.hMin.toFixed(1)}%`, 'right');
 
   ctx.setLineDash([]);
   ctx.restore();
@@ -561,11 +604,9 @@ canvas.addEventListener('touchend', hideTip);
 window.addEventListener('resize', draw);
 
 // ---- boot + auto-refresh --------------------------------------------------
-// Readings and hi/lo summaries are fetched together so the lines never lag a
-// refresh cycle behind the series they annotate.
+// The hi/lo lines derive from the loaded points, so one fetch refreshes both.
 async function refresh() {
-  await Promise.all([loadData(), loadStats()]);
-  draw();
+  await loadData();
 }
 
 (async function () {
@@ -573,16 +614,6 @@ async function refresh() {
   applyTheme(saved === 'dark' ? 'dark' : 'light');   // default light
   $('theme').onclick = () =>
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-
-  const statsSel = $('stats');
-  const STATS_CHOICES = ['off', '24h', '48h', '7d', 'all'];
-  if (!STATS_CHOICES.includes(statsMode)) statsMode = '24h';
-  statsSel.value = statsMode;
-  statsSel.onchange = () => {
-    statsMode = statsSel.value;
-    prefSet('stats', statsMode);
-    draw();
-  };
 
   // Meta only shapes the window selector; if it fails, loadData still reports
   // the real problem and the chart falls back to the default 7-day window.

@@ -8,7 +8,7 @@
 //                                   signal still shows the last readings fetched
 //
 // Bump CACHE when the shell changes so old clients pick up the new HTML.
-const CACHE = 'orchidd-v2';
+const CACHE = 'orchidd-v3';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
