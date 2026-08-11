@@ -29,7 +29,7 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     -webkit-text-size-adjust: 100%; }
   /* Respect the notch/home indicator when launched as a Home Screen app. */
   header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
@@ -37,8 +37,8 @@
     padding-top: calc(14px + env(safe-area-inset-top));
     padding-left: calc(20px + env(safe-area-inset-left));
     padding-right: calc(20px + env(safe-area-inset-right)); }
-  h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  .now { color: var(--muted); font-size: 13px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .now { color: var(--muted); font-size: 15px; }
   .now .t { color: var(--temp); font-weight: 600; }
   .now .h { color: var(--hum); font-weight: 600; }
   .spacer { flex: 1; }
@@ -58,13 +58,13 @@
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
   #tip { position: absolute; pointer-events: none; background: var(--tipbg); color: var(--tiptext);
-    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 14px;
     white-space: nowrap; opacity: 0; transition: opacity .05s; }
   .empty { color: var(--muted); padding: 40px; text-align: center; }
   /* Connectivity / session banner. Hidden unless something needs saying. */
   #banner { display: none; margin: 0 0 12px; padding: 10px 12px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--panel); color: var(--muted);
-    font-size: 13px; }
+    font-size: 15px; }
   #banner[data-show] { display: block; }
   #banner button { margin-left: 8px; font: inherit; color: var(--hum);
     background: none; border: none; padding: 0; text-decoration: underline; cursor: pointer; }
@@ -72,11 +72,11 @@
   @media (max-width: 560px) {
     header { gap: 10px 14px; padding: 12px 14px;
       padding-top: calc(12px + env(safe-area-inset-top)); }
-    h1 { font-size: 15px; }
+    h1 { font-size: 17px; }
     .spacer { flex-basis: 100%; height: 0; }
     main { padding: 12px 14px; }
     canvas { height: 66vh; }
-    .legend { flex-wrap: wrap; gap: 10px 14px; font-size: 12px; }
+    .legend { flex-wrap: wrap; gap: 10px 14px; font-size: 14px; }
     #count { margin-left: 0 !important; }
   }
 </style>
@@ -351,7 +351,9 @@ function draw() {
   ctx.clearRect(0, 0, cssW, cssH);
 
   const n = data.t.length;
-  const padL = 52, padR = 52, padT = 12, padB = 28;
+  const padL = 56, padR = 56, padT = 12;
+  // Two-line x labels (time + date) on long ranges need a taller bottom band.
+  const padB = selectedDays > 1.5 ? 46 : 30;
   const W = cssW - padL - padR, H = cssH - padT - padB;
   if (n === 0 || W <= 0 || H <= 0) { geo = null; return; }
 
@@ -381,7 +383,7 @@ function draw() {
   geo = { padL, padT, W, H, x, t0, tSpan };
 
   // Shared horizontal gridlines: one per interval, temp label left, humidity right.
-  ctx.font = '11px sans-serif';
+  ctx.font = '13px sans-serif';
   ctx.lineWidth = 1;
   for (let i = 0; i <= k; i++) {
     const yy = padT + H - (H * i / k);
@@ -393,13 +395,27 @@ function draw() {
     ctx.fillText((hAxis.min + i * hAxis.step).toFixed(hDec) + '%', padL + W + 6, yy);
   }
 
-  // x-axis time labels
-  ctx.fillStyle = MUTED; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  // x-axis: each tick snaps to the nearest half hour so the label reads a
+  // clean clock time, and a vertical gridline (same weight as the horizontal
+  // ones) marks exactly where that time falls. Ranges past ~1.5 days add the
+  // date on a second line since the times alone would be ambiguous.
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   const labels = 6;
+  const HALF_HOUR = 30 * 60 * 1000;
+  const twoLine = tSpan > 36 * 3600 * 1000;
+  const drawn = new Set();
   for (let i = 0; i <= labels; i++) {
-    const tt = t0 + tSpan * i / labels;
-    const xx = padL + W * i / labels;
-    ctx.fillText(fmtTime(tt, tSpan), xx, padT + H + 6);
+    const tt = Math.round((t0 + tSpan * i / labels) / HALF_HOUR) * HALF_HOUR;
+    if (tt < t0 || tt > t1 || drawn.has(tt)) continue; // snapped out of range
+    drawn.add(tt);
+    const xx = x(tt);
+    ctx.strokeStyle = GRID;
+    ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + H); ctx.stroke();
+    const d = new Date(tt);
+    ctx.fillStyle = MUTED;
+    ctx.fillText(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), xx, padT + H + 6);
+    if (twoLine)
+      ctx.fillText(d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }), xx, padT + H + 22);
   }
 
   // hi/lo reference lines, drawn under the series so live data stays dominant
@@ -449,7 +465,7 @@ function drawStatLines(windows, yT, yH, padL, W, padT, H) {
   const panel = getComputedStyle(document.documentElement).getPropertyValue('--panel').trim();
 
   ctx.save();
-  ctx.font = '10px sans-serif';
+  ctx.font = '12px sans-serif';
   ctx.textBaseline = 'bottom';
   ctx.lineWidth = 1.25;
 
@@ -475,7 +491,7 @@ function drawStatLines(windows, yT, yH, padL, W, padT, H) {
     // gridline or the series itself.
     ctx.globalAlpha = 0.85;
     ctx.fillStyle = panel;
-    ctx.fillRect(x - 3, y - 12, w + 6, 12);
+    ctx.fillRect(x - 3, y - 14, w + 6, 14);
     ctx.globalAlpha = 1;
     ctx.fillStyle = color;
     ctx.textAlign = 'left';
@@ -497,14 +513,6 @@ function drawStatLines(windows, yT, yH, padL, W, padT, H) {
 
 function dot(px, py, color) {
   ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, 3.5, 0, 7); ctx.fill();
-}
-
-function fmtTime(ms, span) {
-  const d = new Date(ms);
-  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  if (span > 36 * 3600 * 1000) // more than ~1.5 days: show date
-    return d.toLocaleDateString([], { month: 'numeric', day: 'numeric' });
-  return hm;
 }
 
 // ---- hover / tooltip ------------------------------------------------------
