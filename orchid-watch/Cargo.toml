@@ -1,0 +1,20 @@
+[package]
+name = "orchid-watch"
+version = "0.1.0"
+edition = "2021"
+description = "Independent watchdog that texts/emails when the orchid room thermostat needs attention"
+license = "MIT"
+repository = "https://github.com/jwmurray/orchidd"
+
+# Deliberately shares no code with the orchidd daemon: it reads orchidd only
+# over HTTP, so a bug in orchidd cannot also silence the thing that reports it.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+chrono-tz = "0.10"
+ureq = { version = "3", default-features = false, features = ["json"] }
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "rustls-tls", "hostname"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
