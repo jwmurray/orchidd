@@ -11,7 +11,8 @@ const USAGE: &str = "usage: orchid-watch            run forever (the service)
 
 Environment: ORCHID_WATCH_URL, ORCHID_WATCH_STATE, ORCHID_NTFY_URL, ORCHID_NTFY_TOKEN_FILE,
 ORCHID_WARMUP_MIN, ORCHID_REPEAT_MIN, ORCHID_HOT_F, ORCHID_INTERVAL_S,
-ORCHID_SMTP_HOST, ORCHID_SMTP_PORT, ORCHID_SMTP_USER, ORCHID_SMTP_PASS_FILE, ORCHID_SMTP_FROM";
+ORCHID_SMTP_HOST, ORCHID_SMTP_PORT, ORCHID_SMTP_USER, ORCHID_SMTP_PASS_FILE, ORCHID_SMTP_FROM,
+ORCHID_ADMIN_NTFY_URL, ORCHID_ADMIN_NTFY_TOKEN_FILE, ORCHID_ADMIN_TO, ORCHID_RELAY_STALE_MIN";
 
 enum Cmd {
     Run,
@@ -66,6 +67,14 @@ fn build(cfg: &Config, quiet: bool) -> Result<Watcher, String> {
             None
         }
     };
+    // John's channel: tells him when Rose Marie's relay (or orchidd) is down.
+    let admin: Option<(Box<dyn Publish>, String)> = match &cfg.admin {
+        Some(a) => {
+            let token = a.token_file.as_deref().map(read_secret).transpose()?;
+            Some((Box::new(Ntfy::new(&a.ntfy_url, token)), a.to.clone()))
+        }
+        None => None,
+    };
     let state = match State::load(&cfg.state_path) {
         Ok(s) => s,
         Err(e) => {
@@ -75,11 +84,12 @@ fn build(cfg: &Config, quiet: bool) -> Result<Watcher, String> {
     };
     if !quiet {
         log(&format!(
-            "watching {} every {} s (text: {}, email: {})",
+            "watching {} every {} s (text: {}, email: {}, admin: {})",
             cfg.url,
             cfg.interval_s,
             if sms.is_some() { "on" } else { "off" },
             if mail.is_some() { "on" } else { "off" },
+            if admin.is_some() { "on" } else { "off" },
         ));
     }
     Ok(Watcher {
@@ -87,6 +97,7 @@ fn build(cfg: &Config, quiet: bool) -> Result<Watcher, String> {
         fetch: Box::new(OrchiddHttp::new(&cfg.url)),
         sms,
         mail,
+        admin,
         cfg: cfg.watch.clone(),
         state,
         state_path: Some(cfg.state_path.clone()),

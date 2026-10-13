@@ -77,6 +77,38 @@ ssh m2max 'launchctl bootout gui/$(id -u)/org.jwmfirm.orchid-relay'
 The iMac needs `~/Library/Application Support/firm/lead-imessage-relay.py`
 first (from mycase `deploy/`). Run only one relay: two send every alert twice.
 
+## John is told when the relay is down
+
+Rose Marie's texts depend on the iMessage relay running in jmurray's login
+session on the iMac. After a restart with nobody logged in, the relay is dead
+and her alerts stop silently. The relay touches
+`~/.config/firm/orchid-relay.alive` whenever its ntfy stream carries traffic;
+orchidd reports that file's age in `/api/status` (`relay_watched`,
+`relay_age_s`), and orchid-watch raises `relay_down` once it is older than
+`ORCHID_RELAY_STALE_MIN` (default 10) minutes, or missing.
+
+`relay_down` goes only to John, on the firm's leads topic (relayed by m2max,
+tagged `to:<ORCHID_ADMIN_TO>`), with the Screen Sharing steps to log the iMac
+back in. It repeats every `ORCHID_REPEAT_MIN` and sends one "Orchid alerts
+restored" when the relay checks in again. `orchidd_down` alerts are copied to
+John too, since the relay on the same iMac is then almost certainly down.
+
+One-time setup, from your Mac:
+
+```sh
+ORCHID_ADMIN_TOPIC=<leads topic> deploy/alerts/setup-ntfy-gardenway.sh
+ORCHID_ADMIN_TOPIC=<leads topic> deploy/alerts/install-watch-gardenway.sh --test
+ORCHIDD_RELAY_ALIVE=/Users/jmurray/.config/firm/orchid-relay.alive ./deploy/install-macos.sh --system   # on the iMac
+```
+
+The first grants `orchid-pub` write-only on the leads topic; the second adds
+`ORCHID_ADMIN_NTFY_URL` and `ORCHID_ADMIN_TO` (default `+18016280543`) to
+`/etc/orchid-watch/env` and sends a test through every channel, John's
+included.
+
+Screen Sharing must be on for the fix in the text to work: on the iMac,
+System Settings > General > Sharing > Screen Sharing.
+
 ## Add email
 
 1. In the Google account that will send (2-Step Verification on), create an
@@ -111,5 +143,8 @@ first (from mycase `deploy/`). Run only one relay: two send every alert twice.
 | `ORCHID_SMTP_PASS_FILE` | systemd credential `smtp.pass` |
 | `ORCHID_SMTP_PORT` | `587` (STARTTLS; `465` = implicit TLS) |
 | `ORCHID_SMTP_FROM` | `ORCHID_SMTP_USER` |
+| `ORCHID_ADMIN_NTFY_URL`, `ORCHID_ADMIN_TO` | unset (John's channel off); both needed |
+| `ORCHID_ADMIN_NTFY_TOKEN_FILE` | systemd credential `admin-ntfy.token`, else the main ntfy token |
+| `ORCHID_RELAY_STALE_MIN` | `10` |
 
 After editing: `ssh gardenway sudo systemctl restart orchid-watch`.

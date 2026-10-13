@@ -48,6 +48,8 @@ pub struct WatchConfig {
     pub warmup_min: i64,
     pub repeat_min: i64,
     pub hot_f: f64,
+    /// Minutes without a relay heartbeat before John is told.
+    pub relay_stale_min: i64,
 }
 
 impl Default for WatchConfig {
@@ -56,6 +58,7 @@ impl Default for WatchConfig {
             warmup_min: 120,
             repeat_min: 60,
             hot_f: 90.0,
+            relay_stale_min: 10,
         }
     }
 }
@@ -72,9 +75,13 @@ pub enum Condition {
     PlugUnreachable,
     BelowSetpoint,
     TooHot,
+    /// Rose Marie's iMessage relay has stopped checking in. Admin channel only.
+    RelayDown,
 }
 
 impl Condition {
+    /// The conditions read off orchidd's own alert state. `RelayDown` is not
+    /// among them: it is evaluated only when the admin channel exists.
     pub const ALL: [Condition; 5] = [
         Condition::OrchiddDown,
         Condition::SensorStale,
@@ -87,6 +94,8 @@ impl Condition {
     pub fn hold_secs(self) -> i64 {
         match self {
             Condition::BelowSetpoint => 10 * 60,
+            // The staleness window is already the debounce.
+            Condition::RelayDown => 0,
             _ => 5 * 60,
         }
     }
@@ -98,6 +107,7 @@ impl Condition {
             Condition::PlugUnreachable => "plug_unreachable",
             Condition::BelowSetpoint => "below_setpoint",
             Condition::TooHot => "too_hot",
+            Condition::RelayDown => "relay_down",
         }
     }
 }
@@ -129,6 +139,8 @@ pub enum Reading {
 pub enum Channel {
     Sms,
     Email,
+    /// John, on the firm's leads topic through a different relay.
+    Admin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -316,6 +328,19 @@ pub fn derive(
     out
 }
 
+/// Is the iMessage relay on the iMac checking in? Unknown while orchidd
+/// itself is unreachable (that is `orchidd_down`'s job).
+pub fn relay_reading(status: Option<&Status>, stale_min: i64) -> Reading {
+    match status {
+        None => Reading::Unknown,
+        Some(s) if !s.relay_watched => Reading::Clear,
+        Some(s) => match s.relay_age_s {
+            Some(a) if a <= stale_min * 60 => Reading::Clear,
+            _ => Reading::Raised,
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wording — for Rose Marie, not for an engineer
 // ---------------------------------------------------------------------------
@@ -350,6 +375,9 @@ pub struct Ctx<'a> {
 
 /// Title and body for one message.
 pub fn compose(cond: Condition, kind: Kind, cx: &Ctx) -> (String, String) {
+    if cond == Condition::RelayDown {
+        return compose_relay(kind, cx);
+    }
     let temp = cx.status.and_then(|s| s.temp_f);
     let temp_txt = temp.map_or("temperature unknown".to_string(), |t| format!("{t:.1}°F"));
     if kind == Kind::Recovery {
@@ -363,6 +391,7 @@ pub fn compose(cond: Condition, kind: Kind, cx: &Ctx) -> (String, String) {
             Condition::SensorStale => "Sensor reporting again",
             Condition::PlugUnreachable => "Heater plug answering again",
             Condition::BelowSetpoint | Condition::TooHot => "Back to normal",
+            Condition::RelayDown => unreachable!("composed by compose_relay"),
         };
         let mut msg = format!("{lead}: {temp_txt}{heater}.");
         if cx.status.is_some_and(|s| s.mode == "off") {
@@ -431,6 +460,7 @@ pub fn compose(cond: Condition, kind: Kind, cx: &Ctx) -> (String, String) {
                 ),
             )
         }
+        Condition::RelayDown => unreachable!("composed by compose_relay"),
         Condition::TooHot => {
             let s = cx.status.expect("too_hot needs a status");
             let t = temp.unwrap_or(cx.cfg.hot_f);
@@ -448,6 +478,42 @@ pub fn compose(cond: Condition, kind: Kind, cx: &Ctx) -> (String, String) {
         (format!("Still: {title}"), msg)
     } else {
         (title, msg)
+    }
+}
+
+/// The relay-down message — for John, who has to go and fix it.
+fn compose_relay(kind: Kind, cx: &Ctx) -> (String, String) {
+    if kind == Kind::Recovery {
+        return (
+            "Orchid alerts restored".into(),
+            "The iMessage relay on the iMac is checking in again; \
+             Rose Marie's orchid alerts are back on."
+                .into(),
+        );
+    }
+    let n = cx
+        .status
+        .and_then(|s| s.relay_age_s)
+        .map_or("an unknown number of".to_string(), |a| mins(a).to_string());
+    let title = "Orchid alerts are down";
+    let msg = format!(
+        "Rose Marie will NOT get orchid texts: the iMessage relay on the iMac has not \
+         checked in for {n} minutes. Usually the iMac restarted and nobody has logged \
+         into jmurray.
+
+Fix it from your laptop:
+At home: Finder > Go > Connect to Server (Cmd-K), enter vnc://192.168.0.15, log in \
+         as jmurray, then close the Screen Sharing window (do not log out).
+Away from home: in Terminal run
+  ssh -N -L 5901:192.168.0.15:5900 gardenway
+then Cmd-K, enter vnc://localhost:5901, and log in as jmurray the same way.
+
+You will get an \"Orchid alerts restored\" text when it is back."
+    );
+    if kind == Kind::Repeat {
+        (format!("Still: {title}"), msg)
+    } else {
+        (title.into(), msg)
     }
 }
 
@@ -481,6 +547,8 @@ pub struct Watcher {
     pub fetch: Box<dyn Fetch>,
     pub sms: Option<Box<dyn Publish>>,
     pub mail: Option<Box<dyn Mail>>,
+    /// John's channel and his E.164 number, when configured.
+    pub admin: Option<(Box<dyn Publish>, String)>,
     pub cfg: WatchConfig,
     pub state: State,
     pub state_path: Option<PathBuf>,
@@ -514,6 +582,25 @@ impl Watcher {
         out
     }
 
+    /// Who hears about `cond`: Rose Marie's channels, plus John for
+    /// `orchidd_down` (her relay runs on the same iMac), and only John for
+    /// `relay_down`.
+    fn recipients_for(
+        &self,
+        cond: Condition,
+        base: &[(Channel, Option<String>)],
+    ) -> Vec<(Channel, Option<String>)> {
+        let admin = self
+            .admin
+            .as_ref()
+            .map(|(_, to)| (Channel::Admin, Some(to.clone())));
+        match cond {
+            Condition::RelayDown => admin.into_iter().collect(),
+            Condition::OrchiddDown => base.iter().cloned().chain(admin).collect(),
+            _ => base.to_vec(),
+        }
+    }
+
     fn deliver(
         &self,
         channel: Channel,
@@ -532,6 +619,12 @@ impl Watcher {
                 title,
                 msg,
             ),
+            Channel::Admin => self
+                .admin
+                .as_ref()
+                .ok_or("admin channel not configured")?
+                .0
+                .publish(title, msg, to),
         }
     }
 
@@ -551,12 +644,18 @@ impl Watcher {
                 Err(e) => log(&format!("settings unavailable, using last known: {e}")),
             }
         }
-        let readings = derive(
+        let mut readings = derive(
             now,
             status.as_ref(),
             self.state.settings.as_ref(),
             &self.cfg,
         );
+        if self.admin.is_some() {
+            readings.insert(
+                Condition::RelayDown,
+                relay_reading(status.as_ref(), self.cfg.relay_stale_min),
+            );
+        }
 
         for (cond, r) in &readings {
             let cs = self.state.conditions.entry(*cond).or_default();
@@ -582,7 +681,7 @@ impl Watcher {
             let cs = &self.state.conditions[cond];
             let qualified =
                 *r == Reading::Raised && cs.first_seen.is_some_and(|f| now - f >= cond.hold_secs());
-            for (ch, to) in &recipients {
+            for (ch, to) in &self.recipients_for(*cond, &recipients) {
                 let kind = match (qualified, *r, cs.sent.get(ch)) {
                     (true, _, None) => Some(Kind::Alert),
                     (true, _, Some(&last)) if now - last >= repeat => Some(Kind::Repeat),
@@ -649,9 +748,13 @@ impl Watcher {
 
         // A cleared condition owes nothing on a channel that no longer exists,
         // and nothing at all while alerts are switched off.
-        let live: Vec<Channel> = recipients.iter().map(|r| r.0).collect();
         for (cond, r) in &readings {
             if *r == Reading::Clear {
+                let live: Vec<Channel> = self
+                    .recipients_for(*cond, &recipients)
+                    .iter()
+                    .map(|r| r.0)
+                    .collect();
                 let cs = self.state.conditions.get_mut(cond).expect("present");
                 if !enabled {
                     cs.sent.clear();
@@ -686,12 +789,15 @@ impl Watcher {
         }
         let mut ok = Vec::new();
         let mut failed = Vec::new();
-        let recipients = self.recipients();
-        if recipients.is_empty() {
-            failed.push("no channel configured".to_string());
-        }
+        let mut recipients = self.recipients();
         if self.mail.is_some() && !recipients.iter().any(|r| r.0 == Channel::Email) {
             ok.push("email: skipped, no alert_email set on the settings page".to_string());
+        }
+        if let Some((_, to)) = &self.admin {
+            recipients.push((Channel::Admin, Some(to.clone())));
+        }
+        if recipients.is_empty() {
+            failed.push("no channel configured".to_string());
         }
         for (ch, to) in recipients {
             let who = to.clone().unwrap_or_else(|| "relay fallback".into());
@@ -732,6 +838,7 @@ mod tests {
         settings: Option<Settings>,
         sms: Vec<(String, String, Option<String>)>,
         mail: Vec<(String, String, String)>,
+        admin: Vec<(String, String, Option<String>)>,
         sms_fails: bool,
         mail_fails: bool,
     }
@@ -768,6 +875,16 @@ mod tests {
                 return Err("ntfy 502".into());
             }
             w.sms.push((t.into(), m.into(), to.map(String::from)));
+            Ok(())
+        }
+    }
+    struct FAdmin(W);
+    impl Publish for FAdmin {
+        fn publish(&self, t: &str, m: &str, to: Option<&str>) -> Result<(), String> {
+            self.0
+                .borrow_mut()
+                .admin
+                .push((t.into(), m.into(), to.map(String::from)));
             Ok(())
         }
     }
@@ -814,6 +931,8 @@ mod tests {
             apower_w: Some(0.0),
             mode: "auto".into(),
             alert: None,
+            relay_watched: false,
+            relay_age_s: None,
         }
     }
 
@@ -844,6 +963,7 @@ mod tests {
             fetch: Box::new(FFetch(w.clone())),
             sms: Some(Box::new(FSms(w.clone()))),
             mail: email.then(|| Box::new(FMail(w.clone())) as Box<dyn Mail>),
+            admin: None,
             cfg: WatchConfig::default(),
             state: State::default(),
             state_path: None,
@@ -861,6 +981,27 @@ mod tests {
 
     fn sms(w: &W) -> Vec<(String, String, Option<String>)> {
         w.borrow().sms.clone()
+    }
+
+    const JOHN: &str = "+18015550142";
+
+    /// A rig with John's admin channel, orchidd watching a fresh relay.
+    fn rig_admin(start: i64) -> (W, Watcher) {
+        let (w, mut wt) = rig(start, false);
+        wt.admin = Some((Box::new(FAdmin(w.clone())), JOHN.into()));
+        relay(&w, true, Some(30));
+        (w, wt)
+    }
+
+    fn relay(w: &W, watched: bool, age_s: Option<i64>) {
+        let mut w = w.borrow_mut();
+        let st = w.status.as_mut().expect("status");
+        st.relay_watched = watched;
+        st.relay_age_s = age_s;
+    }
+
+    fn admin(w: &W) -> Vec<(String, String, Option<String>)> {
+        w.borrow().admin.clone()
     }
 
     // -- phone --------------------------------------------------------------
@@ -1284,6 +1425,128 @@ mod tests {
         run(&w, &mut wt, 11);
         assert!(w.borrow().mail.is_empty());
         assert_eq!(sms(&w)[0].2.as_deref(), Some("+18015550199"));
+    }
+
+    // -- relay down (admin channel) ----------------------------------------
+
+    #[test]
+    fn fresh_relay_sends_nothing() {
+        let (w, mut wt) = rig_admin(MIDNIGHT_DENVER + H);
+        run(&w, &mut wt, 30);
+        assert!(admin(&w).is_empty());
+        assert!(sms(&w).is_empty());
+    }
+
+    #[test]
+    fn stale_relay_tells_john_repeats_and_recovers_once() {
+        let (w, mut wt) = rig_admin(MIDNIGHT_DENVER + H);
+        relay(&w, true, Some(10 * M));
+        run(&w, &mut wt, 5);
+        assert!(admin(&w).is_empty(), "exactly the threshold is not stale");
+        relay(&w, true, Some(12 * M));
+        run(&w, &mut wt, 1);
+        let a = admin(&w);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].0, "Orchid alerts are down");
+        assert_eq!(
+            a[0].1,
+            "Rose Marie will NOT get orchid texts: the iMessage relay on the iMac has not \
+             checked in for 12 minutes. Usually the iMac restarted and nobody has logged \
+             into jmurray.\n\
+             \n\
+             Fix it from your laptop:\n\
+             At home: Finder > Go > Connect to Server (Cmd-K), enter vnc://192.168.0.15, \
+             log in as jmurray, then close the Screen Sharing window (do not log out).\n\
+             Away from home: in Terminal run\n  \
+             ssh -N -L 5901:192.168.0.15:5900 gardenway\n\
+             then Cmd-K, enter vnc://localhost:5901, and log in as jmurray the same way.\n\
+             \n\
+             You will get an \"Orchid alerts restored\" text when it is back."
+        );
+        assert_eq!(a[0].2.as_deref(), Some(JOHN));
+        assert!(sms(&w).is_empty(), "never on Rose Marie's channel");
+
+        run(&w, &mut wt, 59);
+        assert_eq!(admin(&w).len(), 1, "no repeat inside the repeat interval");
+        run(&w, &mut wt, 1);
+        assert_eq!(admin(&w).len(), 2);
+        assert_eq!(admin(&w)[1].0, "Still: Orchid alerts are down");
+
+        relay(&w, true, Some(20));
+        run(&w, &mut wt, 5);
+        let a = admin(&w);
+        assert_eq!(a.len(), 3, "one recovery");
+        assert_eq!(a[2].0, "Orchid alerts restored");
+        assert_eq!(
+            a[2].1,
+            "The iMessage relay on the iMac is checking in again; \
+             Rose Marie's orchid alerts are back on."
+        );
+        assert_eq!(a[2].2.as_deref(), Some(JOHN));
+        assert!(sms(&w).is_empty());
+    }
+
+    #[test]
+    fn relay_that_never_checked_in_is_down() {
+        let (w, mut wt) = rig_admin(MIDNIGHT_DENVER + H);
+        relay(&w, true, None);
+        run(&w, &mut wt, 1);
+        let a = admin(&w);
+        assert_eq!(a.len(), 1);
+        assert!(a[0]
+            .1
+            .contains("has not checked in for an unknown number of minutes."));
+    }
+
+    #[test]
+    fn unwatched_relay_is_ignored() {
+        let (w, mut wt) = rig_admin(MIDNIGHT_DENVER + H);
+        relay(&w, false, None);
+        run(&w, &mut wt, 30);
+        assert!(admin(&w).is_empty());
+    }
+
+    #[test]
+    fn without_the_admin_channel_relay_down_is_not_evaluated() {
+        let (w, mut wt) = rig(MIDNIGHT_DENVER + H, false);
+        relay(&w, true, None);
+        let r = wt.tick(false);
+        run(&w, &mut wt, 30);
+        assert!(!r.readings.contains_key(&Condition::RelayDown));
+        assert!(!wt.state.conditions.contains_key(&Condition::RelayDown));
+        assert!(sms(&w).is_empty());
+    }
+
+    #[test]
+    fn orchidd_down_is_mirrored_to_john() {
+        let (w, mut wt) = rig_admin(MIDNIGHT_DENVER + H);
+        run(&w, &mut wt, 1);
+        w.borrow_mut().status = None;
+        run(&w, &mut wt, 6);
+        let a = admin(&w);
+        assert_eq!(
+            a.len(),
+            1,
+            "relay_down is unknown, not raised, while orchidd is down"
+        );
+        assert_eq!(a[0].0, "Orchid monitor offline");
+        assert_eq!(a[0].2.as_deref(), Some(JOHN));
+        assert_eq!(sms(&w).len(), 1, "Rose Marie is still told");
+        w.borrow_mut().status = Some(ok_status(61.0, "night", 60.0));
+        relay(&w, true, Some(30));
+        run(&w, &mut wt, 1);
+        let a = admin(&w);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[1].0, "Orchid room OK");
+        assert_eq!(sms(&w).len(), 2);
+    }
+
+    #[test]
+    fn send_test_includes_the_admin_channel() {
+        let (w, mut wt) = rig_admin(MIDNIGHT_DENVER);
+        let lines = wt.send_test("hello").unwrap();
+        assert_eq!(admin(&w)[0].2.as_deref(), Some(JOHN));
+        assert!(lines.contains(&format!("Admin to {JOHN}: sent")));
     }
 
     // -- persistence --------------------------------------------------------

@@ -9,6 +9,12 @@
 # overwrites /etc/orchid-watch/env once that exists (it only adds
 # ORCHID_NTFY_URL if missing), so your edits there survive.
 #
+# John's "relay down" channel: run with ORCHID_ADMIN_TOPIC=<the firm's leads
+# topic> (and optionally ORCHID_ADMIN_TO, default +18016280543) and the
+# installer adds ORCHID_ADMIN_NTFY_URL and ORCHID_ADMIN_TO to the env file if
+# they are missing. Run setup-ntfy-gardenway.sh with the same topic first, so
+# orchid-pub may publish to it.
+#
 # Builds from origin/main of https://github.com/jwmurray/orchidd.git in
 # ~/code/orchidd on gardenway. To build a branch: ORCHID_REF=alerts …
 set -eu
@@ -24,10 +30,21 @@ esac
 case "$REF" in
   *[!A-Za-z0-9._/-]*|"") echo "ORCHID_REF has odd characters: $REF" >&2; exit 2 ;;
 esac
+ADMIN_TOPIC=${ORCHID_ADMIN_TOPIC:-}
+ADMIN_TO=${ORCHID_ADMIN_TO:-+18016280543}
+case "$ADMIN_TOPIC" in
+  *[!A-Za-z0-9_-]*) echo "ORCHID_ADMIN_TOPIC may hold only A-Z a-z 0-9 _ -" >&2; exit 2 ;;
+esac
+case "$ADMIN_TO" in
+  +1[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) echo "ORCHID_ADMIN_TO must be +1 and 10 digits" >&2; exit 2 ;;
+esac
 
 {
   printf 'RUN_TEST=%s\n' "$RUN_TEST"
   printf "REF='%s'\n" "$REF"
+  printf "ADMIN_TOPIC='%s'\n" "$ADMIN_TOPIC"
+  printf "ADMIN_TO='%s'\n" "$ADMIN_TO"
   cat <<'REMOTE'
 set -eu
 say() { echo "gardenway: $*"; }
@@ -87,6 +104,17 @@ elif ! sudo grep -q '^ORCHID_NTFY_URL=' "$DIR/env"; then
   say "added ORCHID_NTFY_URL to $DIR/env"
 else
   say "kept existing $DIR/env"
+fi
+if [ -n "$ADMIN_TOPIC" ]; then
+  if ! sudo grep -q '^ORCHID_ADMIN_NTFY_URL=' "$DIR/env"; then
+    printf 'ORCHID_ADMIN_NTFY_URL=http://100.107.226.90:2586/%s\n' "$ADMIN_TOPIC" \
+      | sudo sh -c "cat >> '$DIR/env'"
+    say "added ORCHID_ADMIN_NTFY_URL to $DIR/env"
+  fi
+  if ! sudo grep -q '^ORCHID_ADMIN_TO=' "$DIR/env"; then
+    printf 'ORCHID_ADMIN_TO=%s\n' "$ADMIN_TO" | sudo sh -c "cat >> '$DIR/env'"
+    say "added ORCHID_ADMIN_TO to $DIR/env"
+  fi
 fi
 sudo chmod 600 "$DIR/env"
 
