@@ -91,6 +91,7 @@ cargo run --release
 | `ORCHIDD_PORT` | `8000`      | HTTP/WebSocket port.                              |
 | `ORCHIDD_DB`   | `orchidd.db`| SQLite file path.                                 |
 | `ORCHIDD_HOST` | *(auto)*    | Override the advertised IP (skip auto-detection). |
+| `ORCHIDD_PLUG_URL` | `http://192.168.0.30` | Heater plug URL, used only to seed `plug_url` on first run. |
 
 The installers set `ORCHIDD_DB` and `ORCHIDD_PORT` in the service definition;
 set `ORCHIDD_PORT` before running an installer to change the port.
@@ -121,8 +122,80 @@ The sensor reports on each wake. The graph auto-refreshes every minute.
   pattern per window. `All three` shows all of them at once. The axes expand to
   include whichever lines are shown, so a 7-day high stays visible even while
   viewing the last hour.
+- A status strip above the graph: temperature, Day/Night and setpoint, heater
+  ON/OFF with watts, reading age, and any alert in red. Heater-on periods are
+  shaded on the graph.
 - Theme, time window and Hi/Lo choice are remembered **per browser** in
   `localStorage`, so your phone, laptop and desktop each keep their own settings.
+
+## Thermostat
+
+orchidd can drive a heater plugged into a **Shelly Plus Plug US** (Gen2 RPC, no
+auth) from the H&T readings. A controller task runs every 30 seconds (and
+immediately after a settings change):
+
+1. `GET <plug>/rpc/Switch.GetStatus?id=0` to read the real output and watts.
+2. Decide, in this order: mode `off` → off; no reading newer than
+   `stale_minutes` → off (`sensor_stale`); temperature at/above `max_temp_f` →
+   off; otherwise hysteresis — on at or below the setpoint, off at or above
+   setpoint + `hysteresis_f`, and inside that band keep the current state.
+3. Heating: send `Switch.Set?id=0&on=true&toggle_after=900` whenever the plug is
+   off or 5 minutes have passed since the last refresh. Not heating and the plug
+   is on: send `Switch.Set?id=0&on=false`.
+
+**Dead-man safety.** Every "on" expires on the plug itself after 15 minutes.
+If orchidd crashes, hangs, or loses the network, the heater turns off within 15
+minutes without anything else having to work.
+
+Day is `[day_start, day_end)` in `timezone` local time (wall clock, so DST
+changes need nothing); the rest is night. Each change of heater state is written
+to the `heater_events` table and drawn as shaded bands on the graph.
+
+Readings stay stored in °C exactly as the sensor sends them; the thermostat, its
+settings and its API are all °F, converted when a reading is read back.
+
+### Settings
+
+Stored in the SQLite `settings` table, seeded with defaults on first run, and
+edited from the web page's **Thermostat settings** panel or the API.
+
+| Setting            | Default               | Rule                                          |
+|--------------------|-----------------------|-----------------------------------------------|
+| `mode`             | `auto`                | `auto` or `off` (off keeps the heater off)    |
+| `plug_url`         | `http://192.168.0.30` | `http://…` or `https://…`                     |
+| `timezone`         | `America/Denver`      | IANA zone name                                |
+| `day_start`        | `07:00`               | `HH:MM`, must differ from `day_end`           |
+| `day_end`          | `21:00`               | `HH:MM`                                       |
+| `day_setpoint_f`   | `75.0`                | 32–95                                         |
+| `night_setpoint_f` | `60.0`                | 32–95                                         |
+| `hysteresis_f`     | `1.0`                 | 0.2–5                                         |
+| `max_temp_f`       | `85.0`                | above both setpoints + hysteresis, ≤ 120      |
+| `stale_minutes`    | `20`                  | 6–240                                         |
+| `alert_below_f`    | `1.5`                 | 0–20                                          |
+| `alert_phone`      | `""`                  | stored only                                   |
+| `alert_email`      | `""`                  | stored only                                   |
+| `alerts_enabled`   | `true`                | stored only                                   |
+
+Alert delivery (text/email) is not built yet; `/api/status` reports the current
+alert so something else can act on it.
+
+### API
+
+| Route                    | Purpose                                                     |
+|--------------------------|-------------------------------------------------------------|
+| `GET /api/status`        | `temp_f, humidity, reading_ts, reading_age_s, period, setpoint_f, off_at_f, heater_on, apower_w, controller_reason, plug_error, mode, alert` |
+| `GET /api/settings`      | All settings.                                               |
+| `PUT /api/settings`      | JSON object with any subset of settings. Validated as a whole; `400 {"error": "..."}` and nothing saved on failure. |
+| `GET /api/heater?days=N` | Heater-on intervals, `{"intervals": [[startMs, endMs], ...]}`. |
+
+`alert` is `null` or `{kind, detail}` with `kind` one of `plug_unreachable`,
+`sensor_stale`, or `below_setpoint` (temperature more than `alert_below_f`
+under the setpoint, mode `auto` only), in that order of precedence.
+
+```fish
+curl -s localhost:8000/api/status
+curl -s -X PUT localhost:8000/api/settings -H 'content-type: application/json' -d '{"night_setpoint_f": 58}'
+```
 
 ## Install on an iPhone (or any phone)
 

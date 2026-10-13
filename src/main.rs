@@ -6,6 +6,8 @@
 //! we also actively call `Shelly.GetStatus` on connect so a reading is always
 //! captured. Readings are stored in SQLite and served as JSON to the web UI.
 
+mod thermostat;
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{any, get};
 use axum::Router;
@@ -33,12 +36,25 @@ const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../static/apple-touch-icon.p
 /// a GetStatus response and a NotifyFullStatus) yields one row, not several.
 const MIN_INSERT_INTERVAL_SECS: i64 = 5;
 
+/// Readings are stored in °C, exactly as the Shelly H&T reports them.
+pub(crate) const READINGS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS readings (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts       INTEGER NOT NULL,
+        temp_c   REAL    NOT NULL,
+        humidity REAL    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings(ts);";
+
 #[derive(Clone)]
 struct AppState {
     db: Arc<Mutex<Connection>>,
     /// Last-known values, so a partial NotifyStatus can still form a full row.
     last: Arc<Mutex<LastReading>>,
     last_insert: Arc<AtomicI64>,
+    /// What the thermostat controller last saw and did.
+    heater: Arc<Mutex<thermostat::ControllerStatus>>,
+    /// Wakes the controller early, e.g. right after settings change.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -47,7 +63,7 @@ struct LastReading {
     humidity: Option<f64>,
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -132,22 +148,28 @@ async fn main() {
     let db_path = env_or("ORCHIDD_DB", "orchidd.db");
 
     let conn = Connection::open(&db_path).expect("open sqlite db");
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS readings (
-            id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts       INTEGER NOT NULL,
-            temp_c   REAL    NOT NULL,
-            humidity REAL    NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings(ts);",
-    )
-    .expect("init schema");
+    conn.execute_batch(READINGS_SCHEMA).expect("init schema");
+    thermostat::init_schema(&conn).expect("init thermostat schema");
+    // ORCHIDD_PLUG_URL only seeds the first run; afterwards plug_url lives in
+    // the settings table and is edited through the API.
+    let plug_url = env_or("ORCHIDD_PLUG_URL", thermostat::DEFAULT_PLUG_URL);
+    thermostat::seed_settings(&conn, &thermostat::Settings::defaults(&plug_url))
+        .expect("seed thermostat settings");
 
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         last: Arc::new(Mutex::new(LastReading::default())),
         last_insert: Arc::new(AtomicI64::new(0)),
+        heater: Arc::new(Mutex::new(thermostat::ControllerStatus::default())),
+        wake: Arc::new(tokio::sync::Notify::new()),
     };
+
+    let controller = thermostat::Controller::new(
+        thermostat::ShellyPlug::new(),
+        state.db.clone(),
+        state.heater.clone(),
+    );
+    tokio::spawn(thermostat::run(controller, state.wake.clone()));
 
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
@@ -158,6 +180,9 @@ async fn main() {
         .route("/api/data", get(api_data))
         .route("/api/meta", get(api_meta))
         .route("/api/stats", get(api_stats))
+        .route("/api/status", get(api_status))
+        .route("/api/settings", get(api_settings_get).put(api_settings_put))
+        .route("/api/heater", get(api_heater))
         // Progressive-web-app assets, so the graph installs to a phone's home
         // screen and runs full-screen like a native app.
         .route("/manifest.webmanifest", get(asset_manifest))
@@ -282,7 +307,10 @@ fn process_message(text: &str, state: &AppState) {
 /// Build a response with an explicit content type; browsers refuse to register
 /// a service worker or parse a manifest served as the wrong type.
 fn asset(content_type: &'static str, body: impl Into<axum::body::Body>) -> impl IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, content_type)], body.into())
+    (
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        body.into(),
+    )
 }
 
 async fn asset_manifest() -> impl IntoResponse {
@@ -324,7 +352,11 @@ async fn api_data(State(state): State<AppState>, Query(q): Query<DataQuery>) -> 
             .unwrap();
         let iter = stmt
             .query_map([cutoff], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
             })
             .unwrap();
         iter.filter_map(Result::ok).collect()
@@ -399,11 +431,9 @@ async fn api_stats(State(state): State<AppState>) -> impl IntoResponse {
 async fn api_meta(State(state): State<AppState>) -> impl IntoResponse {
     let (min_ts, max_ts, count): (Option<i64>, Option<i64>, i64) = {
         let db = state.db.lock().unwrap();
-        db.query_row(
-            "SELECT MIN(ts), MAX(ts), COUNT(*) FROM readings",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
+        db.query_row("SELECT MIN(ts), MAX(ts), COUNT(*) FROM readings", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .unwrap_or((None, None, 0))
     };
 
@@ -422,4 +452,72 @@ async fn api_meta(State(state): State<AppState>) -> impl IntoResponse {
         "defaultDays": default_days,
         "maxDays": 7
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Thermostat API.
+// ---------------------------------------------------------------------------
+
+/// Current temperature, period, setpoint, heater state and any alert.
+async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
+    let ctrl = state.heater.lock().unwrap().clone();
+    let db = state.db.lock().unwrap();
+    Json(thermostat::status_json(&db, &ctrl, now_unix()))
+}
+
+async fn api_settings_get(State(state): State<AppState>) -> axum::response::Response {
+    let loaded = thermostat::load_settings(&state.db.lock().unwrap());
+    match loaded {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// Partial update: any subset of settings as a JSON object. The merged result
+/// is validated as a whole; on error nothing is saved and the reply is a 400
+/// with `{"error": "..."}`.
+async fn api_settings_put(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let bad =
+        |msg: String| (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
+    let patch: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return bad(format!("body is not valid JSON: {e}")),
+    };
+    let result = {
+        let db = state.db.lock().unwrap();
+        thermostat::load_settings(&db)
+            .and_then(|current| thermostat::apply_patch(&current, &patch))
+            .and_then(|next| thermostat::save_settings(&db, &next).map(|()| next))
+    };
+    match result {
+        Ok(next) => {
+            state.wake.notify_one();
+            Json(next).into_response()
+        }
+        Err(e) => bad(e),
+    }
+}
+
+/// Heater-on intervals for the graph, over the same `days` window as
+/// /api/data. Times are ms epoch, matching /api/data's `t`.
+async fn api_heater(
+    State(state): State<AppState>,
+    Query(q): Query<DataQuery>,
+) -> impl IntoResponse {
+    let days = q.days.unwrap_or(7.0).clamp(0.01, 3650.0);
+    let now = now_unix();
+    let cutoff = now - (days * 86400.0) as i64;
+    let intervals = thermostat::heater_intervals(&state.db.lock().unwrap(), cutoff, now);
+    let on: Vec<[i64; 2]> = intervals
+        .iter()
+        .map(|(a, b)| [a * 1000, b * 1000])
+        .collect();
+    Json(json!({ "intervals": on }))
 }
