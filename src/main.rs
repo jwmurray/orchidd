@@ -4,8 +4,11 @@
 //! The Shelly device connects OUT to us (it is the WebSocket client); orchidd is
 //! the server. On each wake the device opens the socket and pushes its status;
 //! we also actively call `Shelly.GetStatus` on connect so a reading is always
-//! captured. Readings are stored in SQLite and served as JSON to the web UI.
+//! captured. When the sensor is awake (USB power) orchidd also polls it over
+//! HTTP every `sensor_poll_secs` (see [`sensor`]). Readings are stored in
+//! SQLite and served as JSON to the web UI.
 
+mod sensor;
 mod thermostat;
 
 use std::net::SocketAddr;
@@ -55,6 +58,8 @@ struct AppState {
     heater: Arc<Mutex<thermostat::ControllerStatus>>,
     /// Wakes the controller early, e.g. right after settings change.
     wake: Arc<tokio::sync::Notify>,
+    /// Outcome of the active HTTP poll of the sensor.
+    poll: Arc<Mutex<sensor::PollStatus>>,
 }
 
 #[derive(Default)]
@@ -152,9 +157,11 @@ async fn main() {
     thermostat::init_schema(&conn).expect("init thermostat schema");
     // ORCHIDD_PLUG_URL only seeds the first run; afterwards plug_url lives in
     // the settings table and is edited through the API.
+    // ORCHIDD_SENSOR_URL likewise seeds sensor_url.
     let plug_url = env_or("ORCHIDD_PLUG_URL", thermostat::DEFAULT_PLUG_URL);
-    thermostat::seed_settings(&conn, &thermostat::Settings::defaults(&plug_url))
-        .expect("seed thermostat settings");
+    let mut defaults = thermostat::Settings::defaults(&plug_url);
+    defaults.sensor_url = env_or("ORCHIDD_SENSOR_URL", thermostat::DEFAULT_SENSOR_URL);
+    thermostat::seed_settings(&conn, &defaults).expect("seed thermostat settings");
 
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
@@ -162,6 +169,7 @@ async fn main() {
         last_insert: Arc::new(AtomicI64::new(0)),
         heater: Arc::new(Mutex::new(thermostat::ControllerStatus::default())),
         wake: Arc::new(tokio::sync::Notify::new()),
+        poll: Arc::new(Mutex::new(sensor::PollStatus::default())),
     };
 
     let controller = thermostat::Controller::new(
@@ -170,6 +178,7 @@ async fn main() {
         state.heater.clone(),
     );
     tokio::spawn(thermostat::run(controller, state.wake.clone()));
+    tokio::spawn(sensor::run(poller(sensor::ShellySensor::new(), &state)));
 
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
@@ -238,6 +247,23 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     println!("shelly disconnected");
 }
 
+/// The sensor poller, storing through [`record_reading`] like the websocket.
+fn poller<S: sensor::Sensor>(
+    sensor: S,
+    state: &AppState,
+) -> sensor::Poller<S, impl Fn(f64, f64) + Send + Sync + 'static> {
+    let st = state.clone();
+    sensor::Poller::new(
+        sensor,
+        state.db.clone(),
+        state.poll.clone(),
+        move |t, h| {
+            record_reading(&st, Some(t), Some(h));
+        },
+        state.wake.clone(),
+    )
+}
+
 /// Parse a Shelly RPC frame and store a reading if we can form a complete row.
 ///
 /// Frames of interest carry the sensor components under either `result`
@@ -262,8 +288,14 @@ fn process_message(text: &str, state: &AppState) {
         .and_then(|h| h.get("rh"))
         .and_then(Value::as_f64);
 
+    record_reading(state, temp, hum);
+}
+
+/// Store a reading from any source (websocket push or HTTP poll). Returns
+/// whether a row was written.
+fn record_reading(state: &AppState, temp: Option<f64>, hum: Option<f64>) -> bool {
     if temp.is_none() && hum.is_none() {
-        return;
+        return false;
     }
 
     // Merge with last-known values so a partial update can still form a row.
@@ -277,14 +309,14 @@ fn process_message(text: &str, state: &AppState) {
         }
         match (last.temp_c, last.humidity) {
             (Some(t), Some(h)) => (t, h),
-            _ => return, // wait until we have both at least once
+            _ => return false, // wait until we have both at least once
         }
     };
 
     let now = now_unix();
     let prev = state.last_insert.load(Ordering::Relaxed);
     if now - prev < MIN_INSERT_INTERVAL_SECS {
-        return;
+        return false;
     }
     state.last_insert.store(now, Ordering::Relaxed);
 
@@ -294,10 +326,11 @@ fn process_message(text: &str, state: &AppState) {
         rusqlite::params![now, temp_c, humidity],
     ) {
         eprintln!("db insert error: {e}");
-        return;
+        return false;
     }
     let temp_f = temp_c * 9.0 / 5.0 + 32.0;
     println!("stored  {temp_f:.1}°F  {humidity:.1}%RH");
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -362,17 +395,10 @@ async fn api_data(State(state): State<AppState>, Query(q): Query<DataQuery>) -> 
         iter.filter_map(Result::ok).collect()
     };
 
-    // Downsample by striding if there are more points than we want to render.
-    const MAX_POINTS: usize = 2000;
-    let stride = (rows.len() / MAX_POINTS).max(1);
-
     let mut t = Vec::new();
     let mut temp_f = Vec::new();
     let mut hum = Vec::new();
-    for (i, (ts, tc, rh)) in rows.iter().enumerate() {
-        if i % stride != 0 && i != rows.len() - 1 {
-            continue;
-        }
+    for (ts, tc, rh) in downsample(&rows, MAX_POINTS) {
         t.push(ts * 1000); // ms epoch for JS Date
         let tf = tc * 9.0 / 5.0 + 32.0;
         temp_f.push((tf * 100.0).round() / 100.0);
@@ -380,6 +406,22 @@ async fn api_data(State(state): State<AppState>, Query(q): Query<DataQuery>) -> 
     }
 
     Json(json!({ "unit": "F", "t": t, "tempF": temp_f, "hum": hum }))
+}
+
+/// Most points /api/data returns. At one reading per 30 s, 7 days is ~20,000
+/// rows; anything over ~16 hours is thinned to this many.
+const MAX_POINTS: usize = 2000;
+
+/// Keep every `stride`-th row (plus the newest) so at most about `max` points
+/// remain; short ranges pass through untouched.
+fn downsample<T: Copy>(rows: &[T], max: usize) -> Vec<T> {
+    let stride = rows.len().div_ceil(max.max(1)).max(1);
+    let last = rows.len().saturating_sub(1);
+    rows.iter()
+        .enumerate()
+        .filter(|(i, _)| i % stride == 0 || *i == last)
+        .map(|(_, r)| *r)
+        .collect()
 }
 
 /// High/low temperature and humidity over each summary window.
@@ -461,8 +503,19 @@ async fn api_meta(State(state): State<AppState>) -> impl IntoResponse {
 /// Current temperature, period, setpoint, heater state and any alert.
 async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     let ctrl = state.heater.lock().unwrap().clone();
+    let poll = state.poll.lock().unwrap().clone();
     let db = state.db.lock().unwrap();
-    Json(thermostat::status_json(&db, &ctrl, now_unix()))
+    let now = now_unix();
+    let mut v = thermostat::status_json(&db, &ctrl, now);
+    let settings = thermostat::load_settings(&db)
+        .unwrap_or_else(|_| thermostat::Settings::defaults(thermostat::DEFAULT_PLUG_URL));
+    v["sensor_polling"] = json!(sensor::is_polling(
+        &poll,
+        &settings.sensor_url,
+        settings.sensor_poll_secs,
+        now
+    ));
+    Json(v)
 }
 
 async fn api_settings_get(State(state): State<AppState>) -> axum::response::Response {
@@ -520,4 +573,156 @@ async fn api_heater(
         .map(|(a, b)| [a * 1000, b * 1000])
         .collect();
     Json(json!({ "intervals": on }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sensor::{PollOutcome, Sensor};
+
+    /// Fake sensor: answers with a fixed reading, or fails as if asleep.
+    #[derive(Clone, Default)]
+    struct FakeSensor(Arc<Mutex<FakeSensorState>>);
+
+    #[derive(Default)]
+    struct FakeSensorState {
+        asleep: bool,
+        calls: Vec<String>,
+    }
+
+    impl Sensor for FakeSensor {
+        async fn read(&self, base: &str) -> Result<(f64, f64), String> {
+            let mut st = self.0.lock().unwrap();
+            st.calls.push(base.to_string());
+            if st.asleep {
+                Err("sensor unreachable: timed out".into())
+            } else {
+                Ok((21.9, 68.6))
+            }
+        }
+    }
+
+    fn test_state() -> AppState {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(READINGS_SCHEMA).unwrap();
+        thermostat::init_schema(&conn).unwrap();
+        thermostat::seed_settings(
+            &conn,
+            &thermostat::Settings::defaults(thermostat::DEFAULT_PLUG_URL),
+        )
+        .unwrap();
+        AppState {
+            db: Arc::new(Mutex::new(conn)),
+            last: Arc::new(Mutex::new(LastReading::default())),
+            last_insert: Arc::new(AtomicI64::new(0)),
+            heater: Arc::new(Mutex::new(thermostat::ControllerStatus::default())),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            poll: Arc::new(Mutex::new(sensor::PollStatus::default())),
+        }
+    }
+
+    fn count(state: &AppState) -> i64 {
+        state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM readings", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn poller_inserts_on_success_and_wakes_controller() {
+        let state = test_state();
+        let fake = FakeSensor::default();
+        let p = poller(fake.clone(), &state);
+        assert_eq!(p.step(1000).await, PollOutcome::Stored);
+        assert_eq!(count(&state), 1);
+        let (_, tc, rh) = thermostat::latest_reading(&state.db.lock().unwrap()).unwrap();
+        assert_eq!((tc, rh), (21.9, 68.6));
+        assert_eq!(fake.0.lock().unwrap().calls, ["http://192.168.0.39"]);
+        assert_eq!(state.poll.lock().unwrap().last_ok_ts, Some(1000));
+        // The wake permit is stored, so the controller's next wait returns at once.
+        tokio::time::timeout(std::time::Duration::from_millis(50), state.wake.notified())
+            .await
+            .expect("controller was woken");
+    }
+
+    #[tokio::test]
+    async fn poller_skips_quietly_when_sensor_asleep() {
+        let state = test_state();
+        let fake = FakeSensor::default();
+        fake.0.lock().unwrap().asleep = true;
+        let p = poller(fake.clone(), &state);
+        assert_eq!(p.step(1000).await, PollOutcome::Failed);
+        assert_eq!(count(&state), 0);
+        assert_eq!(state.poll.lock().unwrap().last_ok_ts, None);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), state.wake.notified())
+                .await
+                .is_err(),
+            "no wake on failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn poller_disabled_by_empty_url() {
+        let state = test_state();
+        {
+            let db = state.db.lock().unwrap();
+            let mut s = thermostat::load_settings(&db).unwrap();
+            s.sensor_url = String::new();
+            thermostat::save_settings(&db, &s).unwrap();
+        }
+        let fake = FakeSensor::default();
+        let p = poller(fake.clone(), &state);
+        assert_eq!(p.step(1000).await, PollOutcome::Disabled);
+        assert!(fake.0.lock().unwrap().calls.is_empty());
+        assert_eq!(count(&state), 0);
+    }
+
+    #[test]
+    fn websocket_frames_still_store_through_the_shared_path() {
+        let state = test_state();
+        process_message(
+            r#"{"params":{"temperature:0":{"tC":20.0},"humidity:0":{"rh":50.0}}}"#,
+            &state,
+        );
+        assert_eq!(count(&state), 1);
+    }
+
+    #[test]
+    fn downsample_caps_points_and_keeps_newest() {
+        let short: Vec<i64> = (0..1500).collect();
+        assert_eq!(downsample(&short, MAX_POINTS), short);
+
+        // A week of 30 s readings.
+        let week: Vec<i64> = (0..20_160).collect();
+        let out = downsample(&week, MAX_POINTS);
+        assert!(out.len() <= MAX_POINTS + 1, "{}", out.len());
+        assert!(out.len() > MAX_POINTS / 2);
+        assert_eq!(out.first(), Some(&0));
+        assert_eq!(out.last(), Some(&20_159));
+        assert!(downsample::<i64>(&[], MAX_POINTS).is_empty());
+    }
+
+    #[test]
+    fn range_queries_use_the_ts_index() {
+        let state = test_state();
+        let db = state.db.lock().unwrap();
+        for sql in [
+            "SELECT ts, temp_c, humidity FROM readings WHERE ts >= ?1 ORDER BY ts",
+            "SELECT MIN(temp_c), MAX(temp_c), MIN(humidity), MAX(humidity), COUNT(*)
+             FROM readings WHERE ts >= ?1",
+        ] {
+            let plan: String = db
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([0], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+                .join("; ");
+            assert!(plan.contains("idx_readings_ts"), "{sql}: {plan}");
+        }
+    }
 }

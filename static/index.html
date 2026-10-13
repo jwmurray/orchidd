@@ -169,6 +169,8 @@
         <label>Alert email<input name="alert_email" type="email" autocapitalize="off" /></label>
         <div class="sgroup">Device</div>
         <label>Plug URL<input name="plug_url" type="url" autocapitalize="off" autocorrect="off" spellcheck="false" /></label>
+        <label>Sensor URL (empty = no polling)<input name="sensor_url" type="url" autocapitalize="off" autocorrect="off" spellcheck="false" /></label>
+        <label>Poll sensor every (seconds)<input name="sensor_poll_secs" type="number" step="1" min="10" max="600" inputmode="numeric" /></label>
       </div>
       <div class="sactions">
         <button type="submit">Save</button>
@@ -753,7 +755,8 @@ async function loadStatus() {
 }
 
 // ---- thermostat settings --------------------------------------------------
-const NUMERIC = ['day_setpoint_f', 'night_setpoint_f', 'hysteresis_f', 'max_temp_f', 'stale_minutes', 'alert_below_f'];
+const NUMERIC = ['day_setpoint_f', 'night_setpoint_f', 'hysteresis_f', 'max_temp_f', 'stale_minutes', 'alert_below_f', 'sensor_poll_secs'];
+const INTEGER = ['stale_minutes', 'sensor_poll_secs'];
 function smsg(text, cls) { const m = $('smsg'); m.textContent = text || ''; m.className = cls || ''; }
 
 async function loadSettings() {
@@ -778,7 +781,7 @@ async function saveSettings(ev) {
     else if (NUMERIC.includes(el.name)) {
       const n = Number(el.value);
       if (el.value.trim() === '' || !isFinite(n)) { smsg(el.name + ' needs a number.', 'err'); el.focus(); return; }
-      body[el.name] = el.name === 'stale_minutes' ? Math.round(n) : n;
+      body[el.name] = INTEGER.includes(el.name) ? Math.round(n) : n;
     } else body[el.name] = el.value.trim();
   }
   smsg('Saving…');

@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const DEFAULT_PLUG_URL: &str = "http://192.168.0.30";
+/// The Shelly H&T polled for readings; empty disables polling.
+pub const DEFAULT_SENSOR_URL: &str = "http://192.168.0.39";
 /// Seconds the plug keeps an "on" before switching itself off (dead-man timer).
 pub const TOGGLE_AFTER_SECS: u32 = 900;
 /// Re-send the self-expiring "on" at least this often while heating.
@@ -64,6 +66,9 @@ pub struct Settings {
     pub alert_phone: String,
     pub alert_email: String,
     pub alerts_enabled: bool,
+    /// Sensor base URL for active polling; empty string disables polling.
+    pub sensor_url: String,
+    pub sensor_poll_secs: u32,
 }
 
 impl Settings {
@@ -83,6 +88,8 @@ impl Settings {
             alert_phone: String::new(),
             alert_email: String::new(),
             alerts_enabled: true,
+            sensor_url: DEFAULT_SENSOR_URL.into(),
+            sensor_poll_secs: 30,
         }
     }
 
@@ -115,12 +122,17 @@ impl Settings {
                 self.timezone
             ));
         }
-        let url = self.plug_url.trim();
-        let host = url
-            .strip_prefix("http://")
-            .or_else(|| url.strip_prefix("https://"));
-        if host.is_none_or(|h| h.trim_matches('/').is_empty()) {
+        if !is_http_url(&self.plug_url) {
             return Err("plug_url must look like http://192.168.0.30".into());
+        }
+        if !self.sensor_url.trim().is_empty() && !is_http_url(&self.sensor_url) {
+            return Err(
+                "sensor_url must look like http://192.168.0.39, or be empty to disable polling"
+                    .into(),
+            );
+        }
+        if !(10..=600).contains(&self.sensor_poll_secs) {
+            return Err("sensor_poll_secs must be between 10 and 600".into());
         }
         if !(6..=240).contains(&self.stale_minutes) {
             return Err(
@@ -157,6 +169,14 @@ impl Settings {
         };
         Ok(if day { Period::Day } else { Period::Night })
     }
+}
+
+/// `http://host…` or `https://host…` with a non-empty host.
+fn is_http_url(url: &str) -> bool {
+    let url = url.trim();
+    url.strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .is_some_and(|h| !h.trim_matches('/').is_empty())
 }
 
 /// Strict `HH:MM`, 24-hour, two digits each.
@@ -948,7 +968,45 @@ mod tests {
         assert!(patch(json!({"plug_url": "192.168.0.30"})).is_err());
         assert!(patch(json!({"stale_minutes": 2})).is_err());
         assert!(patch(json!({"bogus": 1})).is_err());
+        assert!(patch(json!({"sensor_url": "192.168.0.39"})).is_err());
+        assert!(patch(json!({"sensor_url": "http://"})).is_err());
+        assert!(patch(json!({"sensor_poll_secs": 9})).is_err());
+        assert!(patch(json!({"sensor_poll_secs": 601})).is_err());
+        assert!(patch(json!({"sensor_poll_secs": -1})).is_err());
         assert!(patch(json!([1, 2])).is_err());
+    }
+
+    #[test]
+    fn sensor_settings_defaults_and_accepted_values() {
+        assert_eq!(s().sensor_url, "http://192.168.0.39");
+        assert_eq!(s().sensor_poll_secs, 30);
+        // Empty (or blank) disables polling and is valid.
+        assert_eq!(patch(json!({"sensor_url": ""})).unwrap().sensor_url, "");
+        assert!(patch(json!({"sensor_url": "  "})).is_ok());
+        assert!(patch(json!({"sensor_url": "https://ht.local/"})).is_ok());
+        assert_eq!(
+            patch(json!({"sensor_poll_secs": 10}))
+                .unwrap()
+                .sensor_poll_secs,
+            10
+        );
+        assert!(patch(json!({"sensor_poll_secs": 600})).is_ok());
+    }
+
+    #[test]
+    fn settings_stored_before_sensor_keys_load_with_defaults() {
+        // A database from before sensor polling has no sensor_* rows.
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        seed_settings(&conn, &s()).unwrap();
+        conn.execute(
+            "DELETE FROM settings WHERE key IN ('sensor_url', 'sensor_poll_secs')",
+            [],
+        )
+        .unwrap();
+        let loaded = load_settings(&conn).unwrap();
+        assert_eq!(loaded.sensor_url, DEFAULT_SENSOR_URL);
+        assert_eq!(loaded.sensor_poll_secs, 30);
     }
 
     #[test]

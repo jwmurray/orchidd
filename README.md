@@ -20,10 +20,37 @@ in SQLite.
 Chosen over MQTT (needs a broker) and RPC-over-UDP (lossy) because it needs no
 extra infrastructure and delivers reliably over TCP.
 
-> **The sensor sleeps, and that is not configurable.** On USB power the H&T Gen3
-> wakes every 5 minutes, reports, and sleeps again. Shelly's firmware has no
-> always-on mode even when USB-powered, so ~5 minutes is the best resolution
-> available. Gaps longer than that mean the sensor or the host was unreachable.
+### Active polling (USB power)
+
+orchidd also polls the sensor over HTTP every `sensor_poll_secs` (default 30):
+
+```
+GET <sensor_url>/rpc/Temperature.GetStatus?id=0   → {"id":0,"tC":21.9,"tF":71.4}
+GET <sensor_url>/rpc/Humidity.GetStatus?id=0      → {"id":0,"rh":68.6}
+```
+
+Each request has a 3-second timeout. A successful poll is stored exactly like a
+websocket push and wakes the thermostat controller at once, so it acts on the
+fresh reading. A failed poll is skipped silently (set `ORCHIDD_DEBUG=1` to see
+the skips); the websocket push keeps working as the fallback.
+
+**The H&T only stays awake on USB power with the batteries removed.** On
+batteries it sleeps between its ~5-minute pushes and almost every poll fails,
+so resolution falls back to the push interval. Set `sensor_url` to an empty
+string to turn polling off.
+
+The push also fires when a reading changes by more than the sensor's report
+threshold. To make pushes more frequent, lower it (run once against the
+sensor while it is awake):
+
+```sh
+curl 'http://<sensor>/rpc/Temperature.SetConfig?id=0&config={"report_thr_C":0.1}'
+```
+
+`/api/status` reports `sensor_polling: true` while the last successful poll is
+within two intervals. At 30-second polling the database grows by ~2,900 rows a
+day; `/api/data` reads through the `ts` index and thins any range longer than
+about 16 hours to at most ~2,000 points, so the graph stays fast.
 
 ## Install as a service
 
@@ -92,6 +119,8 @@ cargo run --release
 | `ORCHIDD_DB`   | `orchidd.db`| SQLite file path.                                 |
 | `ORCHIDD_HOST` | *(auto)*    | Override the advertised IP (skip auto-detection). |
 | `ORCHIDD_PLUG_URL` | `http://192.168.0.30` | Heater plug URL, used only to seed `plug_url` on first run. |
+| `ORCHIDD_SENSOR_URL` | `http://192.168.0.39` | Sensor URL for polling, used only to seed `sensor_url` on first run. |
+| `ORCHIDD_DEBUG` | *(unset)* | Set to log skipped sensor polls. |
 
 The installers set `ORCHIDD_DB` and `ORCHIDD_PORT` in the service definition;
 set `ORCHIDD_PORT` before running an installer to change the port.
@@ -175,6 +204,8 @@ edited from the web page's **Thermostat settings** panel or the API.
 | `alert_phone`      | `""`                  | stored only                                   |
 | `alert_email`      | `""`                  | stored only                                   |
 | `alerts_enabled`   | `true`                | stored only                                   |
+| `sensor_url`       | `http://192.168.0.39` | `http://…`/`https://…`, or `""` to disable polling |
+| `sensor_poll_secs` | `30`                  | 10–600                                        |
 
 Alert delivery (text/email) is not built yet; `/api/status` reports the current
 alert so something else can act on it.
@@ -183,7 +214,7 @@ alert so something else can act on it.
 
 | Route                    | Purpose                                                     |
 |--------------------------|-------------------------------------------------------------|
-| `GET /api/status`        | `temp_f, humidity, reading_ts, reading_age_s, period, setpoint_f, off_at_f, heater_on, apower_w, controller_reason, plug_error, mode, alert` |
+| `GET /api/status`        | `temp_f, humidity, reading_ts, reading_age_s, period, setpoint_f, off_at_f, heater_on, apower_w, controller_reason, plug_error, mode, alert, sensor_polling` |
 | `GET /api/settings`      | All settings.                                               |
 | `PUT /api/settings`      | JSON object with any subset of settings. Validated as a whole; `400 {"error": "..."}` and nothing saved on failure. |
 | `GET /api/heater?days=N` | Heater-on intervals, `{"intervals": [[startMs, endMs], ...]}`. |
