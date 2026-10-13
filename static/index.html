@@ -21,11 +21,13 @@
     --bg: #f5f7fa; --panel: #ffffff; --border: #e2e6eb; --grid: #c2cad6;
     --text: #1b2430; --muted: #5b6675; --temp: #d83a2f; --hum: #1668c9;
     --tipbg: #1b2430; --tiptext: #ffffff;
+    --heat: #f08c00; --alert: #c62828; --ok: #2e7d32;
   }
   :root[data-theme="dark"] {
     --bg: #0e1116; --panel: #161b22; --border: #2a313c; --grid: #495468;
     --text: #c9d1d9; --muted: #8b949e; --temp: #ff6b4a; --hum: #4aa3ff;
     --tipbg: #0b0e12; --tiptext: #ffffff;
+    --heat: #ffa94d; --alert: #ff6b6b; --ok: #69db7c;
   }
   * { box-sizing: border-box; }
   html { font-size: 16px; }
@@ -72,6 +74,36 @@
   #banner[data-show] { display: block; }
   #banner button { margin-left: 8px; font: inherit; color: var(--hum);
     background: none; border: none; padding: 0; text-decoration: underline; cursor: pointer; }
+  /* Thermostat status strip: wraps into rows on a phone. */
+  #status { display: flex; flex-wrap: wrap; gap: 8px 10px; margin: 0 0 12px; }
+  #status .chip { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 10px; font-size: 0.94em; color: var(--muted); }
+  #status .chip b { color: var(--text); font-weight: 600; }
+  #status .chip.temp b { color: var(--temp); }
+  #status .chip.on { border-color: var(--heat); }
+  #status .chip.on b { color: var(--heat); }
+  #status .alert { flex-basis: 100%; color: var(--alert); border-color: var(--alert);
+    font-weight: 600; }
+  /* Settings panel */
+  details.settings { margin-top: 16px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+  details.settings summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+  .sgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15em, 1fr));
+    gap: 10px 18px; margin: 12px 0; }
+  .sgrid label { display: flex; flex-direction: column; gap: 4px; font-size: 0.88em; }
+  .sgrid label.check { flex-direction: row; align-items: center; gap: 8px; }
+  .sgrid input, .sgrid select { font: inherit; font-size: 1em; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 8px; width: 100%; }
+  .sgrid input[type=checkbox] { width: auto; }
+  .sgroup { grid-column: 1 / -1; color: var(--text); font-weight: 600;
+    font-size: 0.94em; border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+  .sactions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .sactions button { font: inherit; background: var(--hum); color: #fff; border: none;
+    border-radius: 6px; padding: 8px 18px; cursor: pointer; }
+  #smsg { font-size: 0.94em; }
+  #smsg.err { color: var(--alert); }
+  #smsg.ok { color: var(--ok); }
   /* Phone layout: the header wraps to two lines and the chart gets more height. */
   @media (max-width: 560px) {
     header { gap: 10px 14px; padding: 12px 14px;
@@ -100,6 +132,7 @@
 </header>
 <main>
   <div id="banner"></div>
+  <div id="status"></div>
   <div class="chartwrap">
     <canvas id="chart"></canvas>
     <div id="tip"></div>
@@ -107,20 +140,54 @@
   <div class="legend">
     <span><i class="swatch" style="background:var(--temp)"></i> Temperature (°F)</span>
     <span><i class="swatch" style="background:var(--hum)"></i> Humidity (%RH)</span>
+    <span><i class="swatch" style="background:var(--heat);height:10px;opacity:.35"></i> Heater on</span>
     <span id="count" style="margin-left:auto"></span>
   </div>
   <div class="empty" id="empty" hidden>No data yet — waiting for the first report from the sensor.</div>
+
+  <details class="settings" id="settingsPanel">
+    <summary>Thermostat settings</summary>
+    <form id="sform" novalidate>
+      <div class="sgrid">
+        <div class="sgroup">Heater</div>
+        <label>Mode
+          <select name="mode"><option value="auto">Auto</option><option value="off">Off (keep heater off)</option></select>
+        </label>
+        <label>Day setpoint (°F)<input name="day_setpoint_f" type="number" step="0.5" min="32" max="95" inputmode="decimal" /></label>
+        <label>Night setpoint (°F)<input name="night_setpoint_f" type="number" step="0.5" min="32" max="95" inputmode="decimal" /></label>
+        <label>Hysteresis (°F above setpoint before off)<input name="hysteresis_f" type="number" step="0.1" min="0.2" max="5" inputmode="decimal" /></label>
+        <label>Max temperature cutoff (°F)<input name="max_temp_f" type="number" step="0.5" inputmode="decimal" /></label>
+        <div class="sgroup">Schedule</div>
+        <label>Day starts<input name="day_start" type="time" step="60" /></label>
+        <label>Day ends (night starts)<input name="day_end" type="time" step="60" /></label>
+        <label>Time zone<input name="timezone" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" /></label>
+        <div class="sgroup">Safety &amp; alerts</div>
+        <label>Sensor stale after (minutes)<input name="stale_minutes" type="number" step="1" min="6" max="240" inputmode="numeric" /></label>
+        <label>Alert when below setpoint by (°F)<input name="alert_below_f" type="number" step="0.5" min="0" max="20" inputmode="decimal" /></label>
+        <label class="check"><input name="alerts_enabled" type="checkbox" /> Alerts enabled</label>
+        <label>Alert phone<input name="alert_phone" type="tel" /></label>
+        <label>Alert email<input name="alert_email" type="email" autocapitalize="off" /></label>
+        <div class="sgroup">Device</div>
+        <label>Plug URL<input name="plug_url" type="url" autocapitalize="off" autocorrect="off" spellcheck="false" /></label>
+      </div>
+      <div class="sactions">
+        <button type="submit">Save</button>
+        <span id="smsg"></span>
+      </div>
+    </form>
+  </details>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let TEMP, HUM, GRID, MUTED;
+let TEMP, HUM, GRID, MUTED, HEAT;
 function refreshColors() {
   const cs = getComputedStyle(document.documentElement);
   TEMP = cs.getPropertyValue('--temp').trim();
   HUM  = cs.getPropertyValue('--hum').trim();
   GRID = cs.getPropertyValue('--grid').trim();
   MUTED = cs.getPropertyValue('--muted').trim();
+  HEAT = cs.getPropertyValue('--heat').trim();
 }
 refreshColors();
 
@@ -161,6 +228,7 @@ function applyFontStep(delta) {
 }
 
 let data = { t: [], tempF: [], hum: [] };      // points inside the window
+let heaterOn = [];                             // [[startMs, endMs], ...] heater-on bands
 let latest = null;                             // newest reading regardless of window
 // "1", "0.5", "week", "lastweek", "lastmonth" or "custom:180" — resolved to a
 // concrete [t0,t1] by resolveRange() every load so calendar ranges track time.
@@ -308,6 +376,10 @@ async function loadData() {
   let raw;
   try {
     raw = await getJSON('/api/data?days=' + fetchDays.toFixed(3));
+    // Heater bands are decoration: a failure here must not hide the graph.
+    try {
+      heaterOn = (await getJSON('/api/heater?days=' + fetchDays.toFixed(3))).intervals || [];
+    } catch (e) { heaterOn = []; }
     lastLoaded = new Date();
     setBanner(null);
   } catch (err) {
@@ -497,6 +569,9 @@ function draw() {
     prevTickDay = d.toDateString();
   }
 
+  // Heater-on bands, shaded under everything else.
+  drawHeaterBands(x, t0, t1, padT, H);
+
   // hi/lo reference lines, drawn under the series so live data stays dominant
   drawHiLoLines(hiLo, yT, yH, padL, W, padT, H);
 
@@ -582,6 +657,20 @@ function drawHiLoLines(hl, yT, yH, padL, W, padT, H) {
   ctx.restore();
 }
 
+function drawHeaterBands(x, t0, t1, padT, H) {
+  if (!heaterOn.length) return;
+  ctx.save();
+  ctx.fillStyle = HEAT;
+  ctx.globalAlpha = 0.18;
+  for (const [a, b] of heaterOn) {
+    const s = Math.max(a, t0), e = Math.min(b, t1);
+    if (e <= s) continue;
+    const xs = x(s), w = Math.max(1, x(e) - xs);
+    ctx.fillRect(xs, padT, w, H);
+  }
+  ctx.restore();
+}
+
 function dot(px, py, color) {
   ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, 3.5, 0, 7); ctx.fill();
 }
@@ -631,10 +720,92 @@ canvas.addEventListener('touchend', hideTip);
 
 window.addEventListener('resize', draw);
 
+// ---- thermostat status ----------------------------------------------------
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function ageText(sec) {
+  if (sec == null) return 'no reading yet';
+  if (sec < 90) return 'reading ' + Math.round(sec) + ' s ago';
+  if (sec < 5400) return 'reading ' + Math.round(sec / 60) + ' min ago';
+  return 'reading ' + (sec / 3600).toFixed(1) + ' h ago';
+}
+async function loadStatus() {
+  let st;
+  try { st = await getJSON('/api/status'); } catch (e) { return; }
+  const chips = [];
+  if (st.temp_f != null) chips.push(`<span class="chip temp"><b>${st.temp_f.toFixed(1)}°F</b></span>`);
+  const per = st.period === 'day' ? 'Day' : 'Night';
+  chips.push(`<span class="chip">${per} · set <b>${st.setpoint_f.toFixed(1)}°F</b></span>`);
+  if (st.mode === 'off') {
+    chips.push(`<span class="chip">Heater <b>OFF</b> (mode off)</span>`);
+  } else if (st.heater_on == null) {
+    chips.push(`<span class="chip">Heater <b>unknown</b></span>`);
+  } else if (st.heater_on) {
+    const w = st.apower_w != null ? ` ${Math.round(st.apower_w)} W` : '';
+    chips.push(`<span class="chip on">Heater <b>ON${w}</b></span>`);
+  } else {
+    chips.push(`<span class="chip">Heater <b>OFF</b></span>`);
+  }
+  chips.push(`<span class="chip">${ageText(st.reading_age_s)}</span>`);
+  if (st.alert) chips.push(`<span class="chip alert">⚠ ${esc(st.alert.detail)}</span>`);
+  $('status').innerHTML = chips.join('');
+}
+
+// ---- thermostat settings --------------------------------------------------
+const NUMERIC = ['day_setpoint_f', 'night_setpoint_f', 'hysteresis_f', 'max_temp_f', 'stale_minutes', 'alert_below_f'];
+function smsg(text, cls) { const m = $('smsg'); m.textContent = text || ''; m.className = cls || ''; }
+
+async function loadSettings() {
+  let s;
+  try { s = await getJSON('/api/settings'); } catch (e) { smsg('Could not load settings.', 'err'); return; }
+  const f = $('sform');
+  for (const [k, v] of Object.entries(s)) {
+    const el = f.elements[k];
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = !!v; else el.value = v;
+  }
+  smsg('');
+}
+
+async function saveSettings(ev) {
+  ev.preventDefault();
+  const f = $('sform');
+  const body = {};
+  for (const el of f.elements) {
+    if (!el.name) continue;
+    if (el.type === 'checkbox') body[el.name] = el.checked;
+    else if (NUMERIC.includes(el.name)) {
+      const n = Number(el.value);
+      if (el.value.trim() === '' || !isFinite(n)) { smsg(el.name + ' needs a number.', 'err'); el.focus(); return; }
+      body[el.name] = el.name === 'stale_minutes' ? Math.round(n) : n;
+    } else body[el.name] = el.value.trim();
+  }
+  smsg('Saving…');
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), cache: 'no-store',
+    });
+    const type = res.headers.get('content-type') || '';
+    if (res.redirected || !type.includes('application/json')) throw new SessionExpired();
+    const out = await res.json();
+    if (!res.ok) { smsg(out.error || ('HTTP ' + res.status), 'err'); return; }
+    smsg('Saved.', 'ok');
+    await loadSettings();
+    smsg('Saved.', 'ok');
+    // The controller acts on the change right away; show its result shortly.
+    setTimeout(loadStatus, 1500);
+  } catch (err) {
+    if (err instanceof SessionExpired) reportError(err);
+    else smsg('Could not reach orchidd — not saved.', 'err');
+  }
+}
+
 // ---- boot + auto-refresh --------------------------------------------------
 // The hi/lo lines derive from the loaded points, so one fetch refreshes both.
 async function refresh() {
-  await loadData();
+  await Promise.all([loadData(), loadStatus()]);
 }
 
 (async function () {
@@ -645,6 +816,13 @@ async function refresh() {
   $('fplus').onclick = () => applyFontStep(1);
   $('theme').onclick = () =>
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+
+  $('sform').addEventListener('submit', saveSettings);
+  // Fill the form when it opens, not on every refresh, so a refresh never
+  // overwrites what someone is typing.
+  $('settingsPanel').addEventListener('toggle', () => {
+    if ($('settingsPanel').open) loadSettings();
+  });
 
   // Meta only shapes the window selector; if it fails, loadData still reports
   // the real problem and the chart falls back to the default 7-day window.
