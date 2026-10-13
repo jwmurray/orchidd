@@ -197,6 +197,13 @@ curl -s localhost:8000/api/status
 curl -s -X PUT localhost:8000/api/settings -H 'content-type: application/json' -d '{"night_setpoint_f": 58}'
 ```
 
+## Alerts (orchid-watch)
+
+Texts and emails come from `orchid-watch`, a separate program (workspace member
+`orchid-watch/`) that runs on another machine and reads orchidd only over HTTP,
+so an orchidd crash or a dead iMac still produces a text. Setup, testing and
+settings: [deploy/alerts/README.md](deploy/alerts/README.md).
+
 ## Install on an iPhone (or any phone)
 
 orchidd serves a progressive web app — a real home-screen icon, launching

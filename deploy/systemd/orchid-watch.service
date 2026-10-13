@@ -1,0 +1,43 @@
+[Unit]
+# orchid-watch: texts (via ntfy + the iMessage relay) and optionally emails when
+# the orchid room needs a person. Runs on gardenway, not on the iMac, so it
+# still speaks up when the iMac or orchidd is down.
+# Installed by deploy/alerts/install-watch-gardenway.sh.
+Description=orchid-watch — orchid room alerting
+Documentation=https://github.com/jwmurray/orchidd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/orchid-watch
+Restart=always
+RestartSec=10
+
+Environment=ORCHID_WATCH_STATE=/var/lib/orchid-watch/state.json
+# Settings (URLs, intervals, SMTP host/user). Overrides the line above.
+EnvironmentFile=/etc/orchid-watch/env
+
+# The publisher token stays root 600; systemd hands the service a private copy
+# in $CREDENTIALS_DIRECTORY, which orchid-watch looks in. The SMTP password, when
+# present, is added by a drop-in (orchid-watch.service.d/smtp.conf).
+LoadCredential=ntfy.token:/etc/orchid-watch/ntfy.token
+
+DynamicUser=yes
+StateDirectory=orchid-watch
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

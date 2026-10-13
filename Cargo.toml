@@ -16,5 +16,10 @@ chrono = "0.4"
 chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
+[workspace]
+members = ["orchid-watch"]
+# `cargo test` / `cargo clippy` at the root cover the watcher too.
+default-members = [".", "orchid-watch"]
+
 [profile.release]
 opt-level = 2
