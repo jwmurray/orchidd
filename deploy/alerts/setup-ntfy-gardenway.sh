@@ -13,6 +13,11 @@
 # On this Mac: ~/.config/firm/orchid-relay.token (600), orchid-relay's token,
 # made only if that file is missing. No token or topic is printed.
 #
+# John's "relay down" alerts go to the firm's leads topic instead. To let
+# orchid-pub publish there too (write-only), name it:
+#
+#   ORCHID_ADMIN_TOPIC=<leads topic> deploy/alerts/setup-ntfy-gardenway.sh
+#
 # If ntfy does not run from the Debian package (e.g. Docker), say how to reach
 # its CLI: NTFY_CMD='docker exec ntfy ntfy' deploy/alerts/setup-ntfy-gardenway.sh
 set -eu
@@ -22,6 +27,10 @@ TOKEN_FILE="$HOME/.config/firm/orchid-relay.token"
 
 case "${NTFY_CMD:-}" in
   *"'"*) echo "NTFY_CMD may not contain a single quote" >&2; exit 2 ;;
+esac
+ADMIN_TOPIC=${ORCHID_ADMIN_TOPIC:-}
+case "$ADMIN_TOPIC" in
+  *[!A-Za-z0-9_-]*) echo "ORCHID_ADMIN_TOPIC may hold only A-Z a-z 0-9 _ -" >&2; exit 2 ;;
 esac
 
 need_relay=1
@@ -35,11 +44,12 @@ umask 077
 tmp=$(mktemp "$(dirname "$TOKEN_FILE")/.orchid-relay.token.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
-# The remote script reads its two settings from the first lines of stdin; its
+# The remote script reads its settings from the first lines of stdin; its
 # stdout is the relay token (or nothing), and it talks to you on stderr.
 {
   printf 'NEED_RELAY=%s\n' "$need_relay"
   printf "NTFY_CMD='%s'\n" "${NTFY_CMD:-}"
+  printf "ADMIN_TOPIC='%s'\n" "$ADMIN_TOPIC"
   cat <<'REMOTE'
 set -eu
 say() { echo "gardenway: $*" >&2; }
@@ -110,6 +120,11 @@ $NTFY access orchid-pub "$TOPIC" write-only </dev/null >/dev/null 2>&1 \
 $NTFY access orchid-relay "$TOPIC" read-only </dev/null >/dev/null 2>&1 \
   || die "ntfy access orchid-relay failed"
 say "access: orchid-pub write-only, orchid-relay read-only on the topic"
+if [ -n "$ADMIN_TOPIC" ]; then
+  $NTFY access orchid-pub "$ADMIN_TOPIC" write-only </dev/null >/dev/null 2>&1 \
+    || die "ntfy access orchid-pub (admin topic) failed"
+  say "access: orchid-pub write-only on the admin topic"
+fi
 
 if [ -s "$DIR/ntfy.token" ]; then
   say "publisher token already in $DIR/ntfy.token"

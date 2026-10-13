@@ -9,6 +9,7 @@
 mod thermostat;
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -55,6 +56,10 @@ struct AppState {
     heater: Arc<Mutex<thermostat::ControllerStatus>>,
     /// Wakes the controller early, e.g. right after settings change.
     wake: Arc<tokio::sync::Notify>,
+    /// ORCHIDD_RELAY_ALIVE: the heartbeat file the iMessage relay touches.
+    /// Its age is reported in /api/status so the watcher can tell when the
+    /// relay has died.
+    relay_alive: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -72,6 +77,13 @@ pub(crate) fn now_unix() -> i64 {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Seconds since `path` was last modified, never negative. None when there is
+/// no path to watch or the file is missing or unreadable.
+fn relay_age(path: Option<&Path>, now: SystemTime) -> Option<i64> {
+    let mtime = std::fs::metadata(path?).and_then(|m| m.modified()).ok()?;
+    Some(now.duration_since(mtime).map_or(0, |d| d.as_secs() as i64))
 }
 
 /// Choose the IP address to advertise for the web UI and the Shelly connection.
@@ -162,6 +174,11 @@ async fn main() {
         last_insert: Arc::new(AtomicI64::new(0)),
         heater: Arc::new(Mutex::new(thermostat::ControllerStatus::default())),
         wake: Arc::new(tokio::sync::Notify::new()),
+        relay_alive: std::env::var("ORCHIDD_RELAY_ALIVE")
+            .ok()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from),
     };
 
     let controller = thermostat::Controller::new(
@@ -458,11 +475,18 @@ async fn api_meta(State(state): State<AppState>) -> impl IntoResponse {
 // Thermostat API.
 // ---------------------------------------------------------------------------
 
-/// Current temperature, period, setpoint, heater state and any alert.
+/// Current temperature, period, setpoint, heater state and any alert, plus
+/// the age of the iMessage relay's heartbeat when one is watched.
 async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     let ctrl = state.heater.lock().unwrap().clone();
-    let db = state.db.lock().unwrap();
-    Json(thermostat::status_json(&db, &ctrl, now_unix()))
+    let mut v = {
+        let db = state.db.lock().unwrap();
+        thermostat::status_json(&db, &ctrl, now_unix())
+    };
+    let watched = state.relay_alive.as_deref();
+    v["relay_watched"] = json!(watched.is_some());
+    v["relay_age_s"] = json!(relay_age(watched, SystemTime::now()));
+    Json(v)
 }
 
 async fn api_settings_get(State(state): State<AppState>) -> axum::response::Response {
@@ -520,4 +544,31 @@ async fn api_heater(
         .map(|(a, b)| [a * 1000, b * 1000])
         .collect();
     Json(json!({ "intervals": on }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn relay_age_is_seconds_since_the_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orchid-relay.alive");
+        std::fs::write(&path, "").unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let later = mtime + Duration::from_secs(125);
+        assert_eq!(relay_age(Some(&path), later), Some(125));
+        // A clock behind the file's mtime is clamped, not negative.
+        let earlier = mtime - Duration::from_secs(30);
+        assert_eq!(relay_age(Some(&path), earlier), Some(0));
+    }
+
+    #[test]
+    fn relay_age_is_none_when_unwatched_or_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(relay_age(None, SystemTime::now()), None);
+        let missing = dir.path().join("nope.alive");
+        assert_eq!(relay_age(Some(&missing), SystemTime::now()), None);
+    }
 }

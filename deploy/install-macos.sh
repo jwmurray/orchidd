@@ -11,12 +11,31 @@
 # needs sudo to install.
 #
 # Re-running is safe: it rebuilds, replaces the binary and restarts the service.
+#
+# Optional, read at install time and written into the plist:
+#   ORCHIDD_PORT          port to serve on (default 8000)
+#   ORCHIDD_RELAY_ALIVE   heartbeat file the iMessage relay touches; orchidd
+#                         reports its age in /api/status so orchid-watch can
+#                         tell John when the relay is down. Left out when unset.
+#
+#   ORCHIDD_RELAY_ALIVE=/Users/jmurray/.config/firm/orchid-relay.alive \
+#       bash deploy/install-macos.sh --system
 set -euo pipefail
 
 LABEL="com.jwmurray.orchidd"
 PORT="${ORCHIDD_PORT:-8000}"
+RELAY_ALIVE="${ORCHIDD_RELAY_ALIVE:-}"
 SYSTEM=0
 [[ "${1:-}" == "--system" ]] && SYSTEM=1
+
+# The path goes into sed and XML: absolute, and nothing either would mangle.
+if [[ -n "$RELAY_ALIVE" ]]; then
+    if [[ "$RELAY_ALIVE" != /* || "$RELAY_ALIVE" == *[\|\&\<\>\\]* ]]; then
+        echo "error: ORCHIDD_RELAY_ALIVE must be an absolute path without | & < > \\" >&2
+        exit 2
+    fi
+    RELAY_ENV="<key>ORCHIDD_RELAY_ALIVE</key><string>$RELAY_ALIVE</string>"
+fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
@@ -58,11 +77,17 @@ if $SUDO launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
 fi
 
 echo "==> Writing $PLIST"
+if [[ -n "$RELAY_ALIVE" ]]; then
+    RELAY_SED="s|@RELAY_ENV@|$RELAY_ENV|"
+else
+    RELAY_SED="/@RELAY_ENV@/d"
+fi
 sed -e "s|@BIN@|$BIN|g" \
     -e "s|@DB@|$DB|g" \
     -e "s|@LOG@|$LOG|g" \
     -e "s|@PORT@|$PORT|g" \
     -e "s|@DATADIR@|$DATADIR|g" \
+    -e "$RELAY_SED" \
     "deploy/launchd/${LABEL}.plist" | $SUDO tee "$PLIST" >/dev/null
 
 if [[ $SYSTEM -eq 1 ]]; then
@@ -81,6 +106,7 @@ if $SUDO launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
     echo "orchidd is running."
     echo "  database: $DB"
     echo "  log:      $LOG"
+    [[ -n "$RELAY_ALIVE" ]] && echo "  relay:    watching $RELAY_ALIVE"
     echo "  status:   ${SUDO:+sudo }launchctl print $DOMAIN/$LABEL"
     echo "  stop:     ${SUDO:+sudo }launchctl bootout $DOMAIN/$LABEL"
     echo

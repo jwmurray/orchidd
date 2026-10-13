@@ -25,6 +25,12 @@ pub struct Status {
     pub mode: String,
     #[serde(default)]
     pub alert: Option<Alert>,
+    /// orchidd is watching the iMessage relay's heartbeat file.
+    #[serde(default)]
+    pub relay_watched: bool,
+    /// Seconds since the relay last checked in; None if it never has.
+    #[serde(default)]
+    pub relay_age_s: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -94,6 +100,20 @@ mod tests {
         .unwrap();
         assert_eq!(s.alert_kind(), None);
         assert_eq!(s.temp_f, None);
+    }
+
+    #[test]
+    fn relay_fields_parse_and_default_when_absent() {
+        let s: Status = serde_json::from_str(
+            r#"{"period":"day","mode":"auto","relay_watched":true,"relay_age_s":42}"#,
+        )
+        .unwrap();
+        assert!(s.relay_watched);
+        assert_eq!(s.relay_age_s, Some(42));
+        // An orchidd from before the relay heartbeat.
+        let s: Status = serde_json::from_str(r#"{"period":"day","mode":"auto"}"#).unwrap();
+        assert!(!s.relay_watched);
+        assert_eq!(s.relay_age_s, None);
     }
 
     #[test]

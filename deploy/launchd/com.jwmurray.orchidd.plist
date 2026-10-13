@@ -5,6 +5,8 @@
 
   Placeholders (@BIN@, @DB@, @LOG@, @PORT@) are substituted by
   deploy/install-macos.sh; this file is the template, not the installed copy.
+  The @RELAY_ENV@ line becomes ORCHIDD_RELAY_ALIVE when the installer is run
+  with that variable set, and is deleted otherwise.
 -->
 <plist version="1.0">
 <dict>
@@ -22,6 +24,7 @@
         <string>@DB@</string>
         <key>ORCHIDD_PORT</key>
         <string>@PORT@</string>
+        @RELAY_ENV@
     </dict>
 
     <!-- Start at load (login for an agent, boot for a daemon) and restart if it
