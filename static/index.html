@@ -142,7 +142,7 @@
   <div class="legend">
     <span><i class="swatch" style="background:var(--temp)"></i> Temperature (°F)</span>
     <span><i class="swatch" style="background:var(--hum)"></i> Humidity (%RH)</span>
-    <span><i class="swatch" style="background:var(--heat);height:10px;opacity:.35"></i> Heater on</span>
+    <span><i class="swatch" style="background:var(--heat)"></i> Heater plug (raised = on)</span>
     <span id="count" style="margin-left:auto"></span>
   </div>
   <div class="empty" id="empty" hidden>No data yet — waiting for the first report from the sensor.</div>
@@ -231,6 +231,7 @@ function applyFontStep(delta) {
 
 let data = { t: [], tempF: [], hum: [] };      // points inside the window
 let heaterOn = [];                             // [[startMs, endMs], ...] heater-on bands
+let heaterKnown = false;                       // false when /api/heater failed
 let latest = null;                             // newest reading regardless of window
 // "1", "0.5", "week", "lastweek", "lastmonth" or "custom:180" — resolved to a
 // concrete [t0,t1] by resolveRange() every load so calendar ranges track time.
@@ -381,7 +382,8 @@ async function loadData() {
     // Heater bands are decoration: a failure here must not hide the graph.
     try {
       heaterOn = (await getJSON('/api/heater?days=' + fetchDays.toFixed(3))).intervals || [];
-    } catch (e) { heaterOn = []; }
+      heaterKnown = true;
+    } catch (e) { heaterOn = []; heaterKnown = false; }
     lastLoaded = new Date();
     setBanner(null);
   } catch (err) {
@@ -573,6 +575,7 @@ function draw() {
 
   // Heater-on bands, shaded under everything else.
   drawHeaterBands(x, t0, t1, padT, H);
+  drawHeaterLine(x, t0, t1, padT, H);
 
   // hi/lo reference lines, drawn under the series so live data stays dominant
   drawHiLoLines(hiLo, yT, yH, padL, W, padT, H);
@@ -670,6 +673,27 @@ function drawHeaterBands(x, t0, t1, padT, H) {
     const xs = x(s), w = Math.max(1, x(e) - xs);
     ctx.fillRect(xs, padT, w, H);
   }
+  ctx.restore();
+}
+
+// Plug on/off as a step line along the bottom of the plot: low = off, raised =
+// on. The bands alone are too faint to read at a glance.
+function drawHeaterLine(x, t0, t1, padT, H) {
+  if (!heaterKnown) return;
+  const yOff = padT + H - 3, yOn = padT + H - Math.max(14, H * 0.08);
+  ctx.save();
+  ctx.strokeStyle = HEAT;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x(t0), yOff);
+  for (const [a, b] of heaterOn) {
+    const s = Math.max(a, t0), e = Math.min(b, t1);
+    if (e <= s) continue;
+    ctx.lineTo(x(s), yOff); ctx.lineTo(x(s), yOn);
+    ctx.lineTo(x(e), yOn); ctx.lineTo(x(e), yOff);
+  }
+  ctx.lineTo(x(t1), yOff);
+  ctx.stroke();
   ctx.restore();
 }
 
