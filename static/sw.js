@@ -2,13 +2,16 @@
 //
 // Two caching strategies, chosen to fit how this app is used from a phone:
 //
-//   app shell (/, icons, manifest)  cache-first  — opens instantly, works offline
+//   page (/)                        network-first with cache fallback — a new
+//                                   release shows on the next load, and the
+//                                   page still opens with no signal
+//   icons, manifest                 cache-first
 //   /api/*                          network-first with cache fallback — always
 //                                   prefers live data, but a cold open with no
 //                                   signal still shows the last readings fetched
 //
 // Bump CACHE when the shell changes so old clients pick up the new HTML.
-const CACHE = 'orchidd-v7';
+const CACHE = 'orchidd-v8';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -32,6 +35,11 @@ function isUsableApiResponse(res) {
   return type.includes('application/json');
 }
 
+function isUsablePage(res) {
+  if (!res || !res.ok || res.redirected) return false;
+  return (res.headers.get('content-type') || '').includes('text/html');
+}
+
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
@@ -39,11 +47,11 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  if (url.pathname.startsWith('/api/')) {
+  if (url.pathname.startsWith('/api/') || url.pathname === '/') {
     e.respondWith(
       fetch(req)
         .then((res) => {
-          if (isUsableApiResponse(res)) {
+          if (url.pathname === '/' ? isUsablePage(res) : isUsableApiResponse(res)) {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put(req, copy));
           }
