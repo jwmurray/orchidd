@@ -21,6 +21,7 @@ struct GraphView: View {
     @State private var points: [Series.Point] = []
     @State private var heater = HeaterIntervals(intervals: [])
     @State private var status: Status?
+    @State private var settings: ThermostatSettings?
     @State private var window = (from: Date(), to: Date())
     @State private var error: String?
 
@@ -57,7 +58,11 @@ struct GraphView: View {
 
     private func header(_ st: Status) -> some View {
         HStack {
-            Text("\(st.period == "day" ? "Day" : "Night") · set \(Fmt.temp(st.setpointF))")
+            if let cfg = settings {
+                Text("\(st.period == "day" ? "Day" : "Night") now · Day \(Fmt.temp(cfg.daySetpointF)) · Night \(Fmt.temp(cfg.nightSetpointF))")
+            } else {
+                Text("\(st.period == "day" ? "Day" : "Night") · set \(Fmt.temp(st.setpointF))")
+            }
             Spacer()
             Text(Fmt.age(st.readingAgeS)).foregroundStyle(.secondary)
         }
@@ -150,6 +155,7 @@ struct GraphView: View {
             points = series.points
             heater = intervals
             status = current
+            settings = try? await client.settings()
             error = nil
         } catch {
             self.error = error.localizedDescription

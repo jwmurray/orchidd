@@ -5,6 +5,7 @@ struct NumbersView: View {
 
     @State private var status: Status?
     @State private var stats: Stats?
+    @State private var settings: ThermostatSettings?
     @State private var error: String?
 
     var body: some View {
@@ -28,7 +29,13 @@ struct NumbersView: View {
                 if let st = status {
                     Section("Now") {
                         row("Heater", Fmt.heater(st), tint: st.heaterOn == true ? .heat : nil)
-                        row(st.period == "day" ? "Day setpoint" : "Night setpoint", Fmt.temp(st.setpointF))
+                        row("Period", st.period == "day" ? "Day" : "Night")
+                        if let cfg = settings {
+                            row("Day setpoint", Fmt.temp(cfg.daySetpointF), bold: st.period == "day")
+                            row("Night setpoint", Fmt.temp(cfg.nightSetpointF), bold: st.period != "day")
+                        } else {
+                            row(st.period == "day" ? "Day setpoint" : "Night setpoint", Fmt.temp(st.setpointF))
+                        }
                         row("Last reading", Fmt.age(st.readingAgeS))
                         if let detail = st.alert?.detail {
                             Label(detail, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
@@ -57,9 +64,9 @@ struct NumbersView: View {
         }
     }
 
-    private func row(_ label: String, _ value: String, tint: Color? = nil) -> some View {
+    private func row(_ label: String, _ value: String, tint: Color? = nil, bold: Bool = false) -> some View {
         LabeledContent(label) {
-            Text(value).monospacedDigit().foregroundStyle(tint ?? .primary)
+            Text(value).monospacedDigit().fontWeight(bold ? .semibold : .regular).foregroundStyle(tint ?? .primary)
         }
     }
 
@@ -68,6 +75,7 @@ struct NumbersView: View {
             async let s = client.status()
             async let x = client.stats()
             (status, stats) = try await (s, x)
+            settings = try? await client.settings()
             error = nil
         } catch {
             self.error = error.localizedDescription
