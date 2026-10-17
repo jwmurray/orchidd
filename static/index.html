@@ -22,12 +22,14 @@
     --text: #1b2430; --muted: #5b6675; --temp: #d83a2f; --hum: #1668c9;
     --tipbg: #1b2430; --tiptext: #ffffff; --tiptemp: #ffa08f; --tiphum: #8fc6ff;
     --heat: #f08c00; --alert: #c62828; --ok: #2e7d32;
+    --day: rgba(255, 212, 59, 0.16); --night: rgba(76, 110, 245, 0.08);
   }
   :root[data-theme="dark"] {
     --bg: #0e1116; --panel: #161b22; --border: #2a313c; --grid: #495468;
     --text: #c9d1d9; --muted: #8b949e; --temp: #ff6b4a; --hum: #4aa3ff;
     --tipbg: #0b0e12; --tiptext: #ffffff; --tiptemp: #ffa08f; --tiphum: #8fc6ff;
     --heat: #ffa94d; --alert: #ff6b6b; --ok: #69db7c;
+    --day: rgba(255, 212, 59, 0.07); --night: rgba(116, 143, 252, 0.12);
   }
   * { box-sizing: border-box; }
   html { font-size: 16px; }
@@ -142,6 +144,8 @@
   <div class="legend">
     <span><i class="swatch" style="background:var(--temp)"></i> Temperature (°F)</span>
     <span><i class="swatch" style="background:var(--hum)"></i> Humidity (%RH)</span>
+    <span><i class="swatch" style="background:var(--day);height:10px;outline:1px solid var(--border)"></i> Day</span>
+    <span><i class="swatch" style="background:var(--night);height:10px;outline:1px solid var(--border)"></i> Night</span>
     <span><i class="swatch" style="background:var(--heat)"></i> <span id="heaterLegend">Heater plug (raised = on)</span></span>
     <span id="count" style="margin-left:auto"></span>
   </div>
@@ -182,7 +186,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let TEMP, HUM, GRID, MUTED, HEAT;
+let TEMP, HUM, GRID, MUTED, HEAT, DAY, NIGHT;
 function refreshColors() {
   const cs = getComputedStyle(document.documentElement);
   TEMP = cs.getPropertyValue('--temp').trim();
@@ -190,6 +194,8 @@ function refreshColors() {
   GRID = cs.getPropertyValue('--grid').trim();
   MUTED = cs.getPropertyValue('--muted').trim();
   HEAT = cs.getPropertyValue('--heat').trim();
+  DAY = cs.getPropertyValue('--day').trim();
+  NIGHT = cs.getPropertyValue('--night').trim();
 }
 refreshColors();
 
@@ -232,6 +238,10 @@ function applyFontStep(delta) {
 let data = { t: [], tempF: [], hum: [] };      // points inside the window
 let heaterOn = [];                             // [[startMs, endMs], ...] heater-on bands
 let heaterKnown = false;                       // false when /api/heater failed
+let schedule = null;                           // { start: "07:00", end: "21:00", tz } from settings
+// Vertical gridlines: 'daynight' marks each day/night switch from the
+// thermostat schedule; 'ticks' is the original line at every time label.
+const GRID_MODE = 'daynight';
 let latest = null;                             // newest reading regardless of window
 // "1", "0.5", "week", "lastweek", "lastmonth" or "custom:180" — resolved to a
 // concrete [t0,t1] by resolveRange() every load so calendar ranges track time.
@@ -384,6 +394,10 @@ async function loadData() {
       heaterOn = (await getJSON('/api/heater?days=' + fetchDays.toFixed(3))).intervals || [];
       heaterKnown = true;
     } catch (e) { heaterOn = []; heaterKnown = false; }
+    try {
+      const st = await getJSON('/api/settings');
+      schedule = { start: st.day_start, end: st.day_end, tz: st.timezone };
+    } catch (e) { schedule = null; }
     lastLoaded = new Date();
     setBanner(null);
   } catch (err) {
@@ -532,6 +546,10 @@ function draw() {
   const yH = (v) => padT + (1 - (v - hAxis.min) / (hAxis.max - hAxis.min)) * H;
   geo = { padL, padT, W, H, x, t0, tSpan };
 
+  // Day/night shading sits under the gridlines and every series.
+  const edges = dayNightEdges(t0, t1);
+  drawDayNight(edges, x, t0, t1, padT, H);
+
   // Shared horizontal gridlines: one per interval, temp label left, humidity right.
   ctx.font = axisFs + 'px sans-serif';
   ctx.lineWidth = 1;
@@ -563,7 +581,10 @@ function draw() {
     drawn.add(tt);
     const xx = x(tt);
     ctx.strokeStyle = GRID;
-    ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + H); ctx.stroke();
+    ctx.beginPath();
+    if (GRID_MODE === 'ticks') { ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + H); }
+    else { ctx.moveTo(xx, padT + H); ctx.lineTo(xx, padT + H + 4); } // tick mark only
+    ctx.stroke();
     const d = new Date(tt);
     ctx.fillStyle = MUTED;
     ctx.fillText(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), xx, padT + H + 6);
@@ -572,6 +593,8 @@ function draw() {
       ctx.fillText(d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }), xx, padT + H + 9 + axisFs);
     prevTickDay = d.toDateString();
   }
+
+  if (GRID_MODE === 'daynight') drawDayNightLines(edges, x, t0, t1, padT, H);
 
   // Heater-on bands, shaded under everything else.
   drawHeaterBands(x, t0, t1, padT, H);
@@ -659,6 +682,77 @@ function drawHiLoLines(hl, yT, yH, padL, W, padT, H) {
   line(hl.hMin, yH, HUM, `lo ${hl.hMin.toFixed(1)}%`, 'right');
 
   ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// ---- day / night ----------------------------------------------------------
+// Offset (ms) of time zone `tz` from UTC at instant `t`.
+function tzOffsetMs(tz, t) {
+  const p = {};
+  for (const x of new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(t))) p[x.type] = x.value;
+  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return asUtc - Math.floor(t / 1000) * 1000;
+}
+
+// Epoch ms of wall-clock y-m-d h:mi in `tz` (two passes settle DST edges).
+function zonedTime(tz, y, mo, d, h, mi) {
+  const guess = Date.UTC(y, mo, d, h, mi);
+  const first = guess - tzOffsetMs(tz, guess);
+  return guess - tzOffsetMs(tz, first);
+}
+
+// Every day-start and day-end inside [t0, t1], plus one on each side so the
+// shading covers the whole window. Sorted; kind = the period that begins.
+function dayNightEdges(t0, t1) {
+  if (!schedule || !schedule.start || !schedule.end) return [];
+  const tz = schedule.tz || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const [sh, sm] = schedule.start.split(':').map(Number);
+  const [eh, em] = schedule.end.split(':').map(Number);
+  const p = {};
+  for (const x of new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(new Date(t0 - 86400000))) p[x.type] = x.value;
+  const edges = [];
+  const days = Math.ceil((t1 - t0) / 86400000) + 3;
+  for (let i = 0; i < days; i++) {
+    const y = +p.year, mo = +p.month - 1, d = +p.day + i; // Date.UTC rolls d over months
+    const day = new Date(Date.UTC(y, mo, d));
+    const [Y, M, D] = [day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()];
+    edges.push({ t: zonedTime(tz, Y, M, D, sh, sm), kind: 'day' });
+    edges.push({ t: zonedTime(tz, Y, M, D, eh, em), kind: 'night' });
+  }
+  return edges.sort((a, b) => a.t - b.t);
+}
+
+function drawDayNight(edges, x, t0, t1, padT, H) {
+  if (!edges.length) return;
+  ctx.save();
+  for (let i = 0; i < edges.length; i++) {
+    const s = Math.max(edges[i].t, t0);
+    const e = Math.min(i + 1 < edges.length ? edges[i + 1].t : t1, t1);
+    if (e <= s) continue;
+    ctx.fillStyle = edges[i].kind === 'day' ? DAY : NIGHT;
+    ctx.fillRect(x(s), padT, x(e) - x(s), H);
+  }
+  // Before the first edge, the period is the opposite of what that edge starts.
+  if (edges[0].t > t0) {
+    ctx.fillStyle = edges[0].kind === 'day' ? NIGHT : DAY;
+    ctx.fillRect(x(t0), padT, x(Math.min(edges[0].t, t1)) - x(t0), H);
+  }
+  ctx.restore();
+}
+
+function drawDayNightLines(edges, x, t0, t1, padT, H) {
+  ctx.save();
+  ctx.strokeStyle = GRID;
+  ctx.lineWidth = 1;
+  for (const { t } of edges) {
+    if (t <= t0 || t >= t1) continue;
+    const xx = Math.round(x(t)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + H); ctx.stroke();
+  }
   ctx.restore();
 }
 
