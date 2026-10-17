@@ -891,10 +891,17 @@ function ageText(sec) {
 async function loadStatus() {
   let st;
   try { st = await getJSON('/api/status'); } catch (e) { return; }
+  let cfg = null;  // day and night setpoints; the status only carries the active one
+  try { cfg = await getJSON('/api/settings'); } catch (e) { /* fall back below */ }
   const chips = [];
   if (st.temp_f != null) chips.push(`<span class="chip temp"><b>${st.temp_f.toFixed(1)}°F</b></span>`);
   const per = st.period === 'day' ? 'Day' : 'Night';
-  chips.push(`<span class="chip">${per} · set <b>${st.setpoint_f.toFixed(1)}°F</b></span>`);
+  if (cfg && cfg.day_setpoint_f != null && cfg.night_setpoint_f != null) {
+    chips.push(`<span class="chip">Now <b>${per}</b></span>`);
+    chips.push(`<span class="chip">Day set <b>${cfg.day_setpoint_f.toFixed(1)}°F</b> · Night set <b>${cfg.night_setpoint_f.toFixed(1)}°F</b></span>`);
+  } else {
+    chips.push(`<span class="chip">${per} · set <b>${st.setpoint_f.toFixed(1)}°F</b></span>`);
+  }
   if (st.mode === 'off') {
     chips.push(`<span class="chip">Heater <b>OFF</b> (mode off)</span>`);
   } else if (st.heater_on == null) {
