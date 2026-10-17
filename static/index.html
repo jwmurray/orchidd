@@ -781,6 +781,15 @@ async function loadStatus() {
     chips.push(`<span class="chip">Heater <b>OFF</b></span>`);
   }
   chips.push(`<span class="chip">${ageText(st.reading_age_s)}</span>`);
+  // 24 h and 7 day temperature extremes. Decoration: a failure must not hide status.
+  try {
+    const stats = await getJSON('/api/stats');
+    for (const [key, label] of [['24h', '24 h'], ['7d', '7 days']]) {
+      const w = (stats.windows || []).find(w => w.key === key);
+      if (w && w.tempMinF != null && w.tempMaxF != null)
+        chips.push(`<span class="chip">${label} · high <b>${w.tempMaxF.toFixed(1)}°</b> · low <b>${w.tempMinF.toFixed(1)}°</b></span>`);
+    }
+  } catch (e) { /* keep the other chips */ }
   if (st.alert) chips.push(`<span class="chip alert">⚠ ${esc(st.alert.detail)}</span>`);
   $('status').innerHTML = chips.join('');
 }
