@@ -142,7 +142,7 @@
   <div class="legend">
     <span><i class="swatch" style="background:var(--temp)"></i> Temperature (°F)</span>
     <span><i class="swatch" style="background:var(--hum)"></i> Humidity (%RH)</span>
-    <span><i class="swatch" style="background:var(--heat)"></i> Heater plug (raised = on)</span>
+    <span><i class="swatch" style="background:var(--heat)"></i> <span id="heaterLegend">Heater plug (raised = on)</span></span>
     <span id="count" style="margin-left:auto"></span>
   </div>
   <div class="empty" id="empty" hidden>No data yet — waiting for the first report from the sensor.</div>
@@ -679,6 +679,7 @@ function drawHeaterBands(x, t0, t1, padT, H) {
 // Plug on/off as a step line along the bottom of the plot: low = off, raised =
 // on. The bands alone are too faint to read at a glance.
 function drawHeaterLine(x, t0, t1, padT, H) {
+  setHeaterLegend(t0, t1);
   if (!heaterKnown) return;
   const yOff = padT + H - 3, yOn = padT + H - Math.max(14, H * 0.08);
   ctx.save();
@@ -695,6 +696,36 @@ function drawHeaterLine(x, t0, t1, padT, H) {
   ctx.lineTo(x(t1), yOff);
   ctx.stroke();
   ctx.restore();
+}
+
+// "the last 7 days", "this week", ... from the range picker's label.
+function periodPhrase() {
+  const text = ($('days').selectedOptions[0] || {}).text || '';
+  if (/^\d/.test(text)) return 'the last ' + text;
+  if (/^(This|Last) /.test(text)) return text.toLowerCase();
+  return 'the period shown';
+}
+
+function onDurationText(ms) {
+  const min = Math.round(ms / 60000);
+  if (min < 60) return min + ' min';
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+// Legend says how much the plug ran in the window on screen, or that it stayed off.
+function setHeaterLegend(t0, t1) {
+  let note;
+  if (!heaterKnown) {
+    note = 'unknown';
+  } else {
+    let onMs = 0;
+    for (const [a, b] of heaterOn) onMs += Math.max(0, Math.min(b, t1) - Math.max(a, t0));
+    note = onMs > 0
+      ? `on ${onDurationText(onMs)} during ${periodPhrase()}`
+      : `off for ${periodPhrase()}`;
+  }
+  $('heaterLegend').textContent = `Heater plug (raised = on) — ${note}`;
 }
 
 function dot(px, py, color) {
