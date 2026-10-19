@@ -64,6 +64,12 @@ pub struct Settings {
     pub alert_phone: String,
     pub alert_email: String,
     pub alerts_enabled: bool,
+    /// Correction the Wi-Fi sensor applies to its own temperature (°F).
+    #[serde(default)]
+    pub sensor_temp_offset_f: f64,
+    /// Correction the Wi-Fi sensor applies to its own humidity (%RH).
+    #[serde(default)]
+    pub sensor_humidity_offset: f64,
 }
 
 impl Settings {
@@ -83,6 +89,8 @@ impl Settings {
             alert_phone: String::new(),
             alert_email: String::new(),
             alerts_enabled: true,
+            sensor_temp_offset_f: 0.0,
+            sensor_humidity_offset: 0.0,
         }
     }
 
@@ -130,6 +138,12 @@ impl Settings {
         }
         if !(0.0..=20.0).contains(&self.alert_below_f) {
             return Err("alert_below_f must be between 0 and 20 °F".into());
+        }
+        if !(-10.0..=10.0).contains(&self.sensor_temp_offset_f) {
+            return Err("sensor_temp_offset_f must be between -10 and 10 °F".into());
+        }
+        if !(-20.0..=20.0).contains(&self.sensor_humidity_offset) {
+            return Err("sensor_humidity_offset must be between -20 and 20 %".into());
         }
         Ok(())
     }

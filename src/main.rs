@@ -7,6 +7,7 @@
 //! captured. Readings are stored in SQLite and served as JSON to the web UI.
 
 mod blu;
+mod sensor_config;
 mod thermostat;
 
 use std::net::SocketAddr;
@@ -249,10 +250,19 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // regardless of what the device pushes on its own.
     let req = r#"{"id":1,"src":"orchidd","method":"Shelly.GetStatus"}"#;
     let _ = socket.send(Message::Text(req.into())).await;
+    // Then check its offsets against the settings (see sensor_config).
+    for r in sensor_config::config_requests() {
+        let _ = socket.send(Message::Text(r.into())).await;
+    }
 
     while let Some(Ok(msg)) = socket.recv().await {
         match msg {
-            Message::Text(t) => process_message(t.as_str(), &state),
+            Message::Text(t) => {
+                process_message(t.as_str(), &state);
+                if let Some(fix) = offset_fix_for(t.as_str(), &state) {
+                    let _ = socket.send(Message::Text(fix.into())).await;
+                }
+            }
             Message::Ping(p) => {
                 let _ = socket.send(Message::Pong(p)).await;
             }
@@ -261,6 +271,27 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
     println!("shelly disconnected");
+}
+
+/// The SetConfig to send when this frame shows a sensor offset that differs
+/// from the settings; logs the sensor's answers to earlier SetConfigs.
+fn offset_fix_for(text: &str, state: &AppState) -> Option<String> {
+    let frame: Value = serde_json::from_str(text).ok()?;
+    if let Some(line) = sensor_config::set_result(&frame) {
+        println!("{line}");
+        return None;
+    }
+    let settings = {
+        let db = state.db.lock().unwrap();
+        thermostat::load_settings(&db).ok()?
+    };
+    let fix = sensor_config::offset_fix(
+        &frame,
+        settings.sensor_temp_offset_f,
+        settings.sensor_humidity_offset,
+    )?;
+    println!("sending sensor offset: {fix}");
+    Some(fix)
 }
 
 /// Parse a Shelly RPC frame and store a reading if we can form a complete row.
