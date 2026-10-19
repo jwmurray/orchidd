@@ -6,6 +6,7 @@
 //! we also actively call `Shelly.GetStatus` on connect so a reading is always
 //! captured. Readings are stored in SQLite and served as JSON to the web UI.
 
+mod blu;
 mod thermostat;
 
 use std::net::SocketAddr;
@@ -18,7 +19,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
-use axum::routing::{any, get};
+use axum::routing::{any, get, post};
 use axum::Router;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -60,6 +61,9 @@ struct AppState {
     /// Its age is reported in /api/status so the watcher can tell when the
     /// relay has died.
     relay_alive: Option<PathBuf>,
+    /// Packet id of the last BLU broadcast stored: the sensor repeats each
+    /// broadcast several times, and the plug forwards every copy it hears.
+    blu_last_packet: Arc<Mutex<Option<u8>>>,
 }
 
 #[derive(Default)]
@@ -161,6 +165,8 @@ async fn main() {
 
     let conn = Connection::open(&db_path).expect("open sqlite db");
     conn.execute_batch(READINGS_SCHEMA).expect("init schema");
+    conn.execute_batch(blu::BLU_SCHEMA)
+        .expect("init blu schema");
     thermostat::init_schema(&conn).expect("init thermostat schema");
     // ORCHIDD_PLUG_URL only seeds the first run; afterwards plug_url lives in
     // the settings table and is edited through the API.
@@ -174,6 +180,7 @@ async fn main() {
         last_insert: Arc::new(AtomicI64::new(0)),
         heater: Arc::new(Mutex::new(thermostat::ControllerStatus::default())),
         wake: Arc::new(tokio::sync::Notify::new()),
+        blu_last_packet: Arc::new(Mutex::new(None)),
         relay_alive: std::env::var("ORCHIDD_RELAY_ALIVE")
             .ok()
             .map(|p| p.trim().to_string())
@@ -200,6 +207,7 @@ async fn main() {
         .route("/api/status", get(api_status))
         .route("/api/settings", get(api_settings_get).put(api_settings_put))
         .route("/api/heater", get(api_heater))
+        .route("/api/blu", post(api_blu))
         // Progressive-web-app assets, so the graph installs to a phone's home
         // screen and runs full-screen like a native app.
         .route("/manifest.webmanifest", get(asset_manifest))
@@ -396,7 +404,61 @@ async fn api_data(State(state): State<AppState>, Query(q): Query<DataQuery>) -> 
         hum.push((rh * 100.0).round() / 100.0);
     }
 
-    Json(json!({ "unit": "F", "t": t, "tempF": temp_f, "hum": hum }))
+    let blu_rows = {
+        let db = state.db.lock().unwrap();
+        blu::since(&db, cutoff).unwrap_or_default()
+    };
+    let blu_stride = (blu_rows.len() / MAX_POINTS).max(1);
+    let (mut bt, mut btemp, mut bhum) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, (ts, tc, rh)) in blu_rows.iter().enumerate() {
+        if i % blu_stride != 0 && i != blu_rows.len() - 1 {
+            continue;
+        }
+        bt.push(ts * 1000);
+        btemp.push(((tc * 9.0 / 5.0 + 32.0) * 100.0).round() / 100.0);
+        bhum.push(rh.map(|h| (h * 100.0).round() / 100.0));
+    }
+
+    Json(json!({
+        "unit": "F",
+        "t": t,
+        "tempF": temp_f,
+        "hum": hum,
+        "blu": { "t": bt, "tempF": btemp, "hum": bhum },
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct BluPost {
+    /// BTHome service data (UUID 0xFCD2) as hex, as the plug script sends it.
+    data: String,
+}
+
+/// A BLU sensor broadcast forwarded by the plug's script.
+async fn api_blu(State(state): State<AppState>, Json(body): Json<BluPost>) -> impl IntoResponse {
+    let Some(r) = blu::parse_bthome(&body.data) else {
+        return (StatusCode::BAD_REQUEST, "not a plain BTHome v2 packet");
+    };
+    {
+        let mut last = state.blu_last_packet.lock().unwrap();
+        if r.packet_id.is_some() && *last == r.packet_id {
+            return (StatusCode::OK, "duplicate");
+        }
+        *last = r.packet_id;
+    }
+    let db = state.db.lock().unwrap();
+    match blu::store(&db, now_unix(), &r) {
+        Ok(true) => {
+            let tf = r.temp_c.unwrap_or_default() * 9.0 / 5.0 + 32.0;
+            println!("blu     {tf:.1}°F  {:?}%RH", r.humidity);
+            (StatusCode::OK, "stored")
+        }
+        Ok(false) => (StatusCode::OK, "no temperature"),
+        Err(e) => {
+            eprintln!("blu insert error: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "db error")
+        }
+    }
 }
 
 /// High/low temperature and humidity over each summary window.
