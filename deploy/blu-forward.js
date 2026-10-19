@@ -26,7 +26,11 @@ BLE.Scanner.Subscribe(function (ev, res) {
   // The sensor repeats each broadcast; send each distinct one once.
   if (data === lastSent) return;
   lastSent = data;
-  HTTP.POST(ORCHIDD, JSON.stringify({ data: data }), { "Content-Type": "application/json" }, function () {});
+  Shelly.call("HTTP.POST", {
+    url: ORCHIDD,
+    body: JSON.stringify({ data: data }),
+    content_type: "application/json",
+  });
 });
 
 if (!BLE.Scanner.isRunning()) {
