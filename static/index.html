@@ -21,7 +21,7 @@
     --bg: #f5f7fa; --panel: #ffffff; --border: #e2e6eb; --grid: #c2cad6;
     --text: #1b2430; --muted: #5b6675; --temp: #d83a2f; --hum: #1668c9;
     --tipbg: #1b2430; --tiptext: #ffffff; --tiptemp: #ffa08f; --tiphum: #8fc6ff;
-    --blu: #2f9e44; --tipblu: #8ce99a;
+    --blu: #868e96; --tipblu: #ced4da;
     --heat: #f08c00; --alert: #c62828; --ok: #2e7d32;
     --day: rgba(255, 212, 59, 0.16); --night: rgba(76, 110, 245, 0.08);
   }
@@ -29,7 +29,7 @@
     --bg: #0e1116; --panel: #161b22; --border: #2a313c; --grid: #495468;
     --text: #c9d1d9; --muted: #8b949e; --temp: #ff6b4a; --hum: #4aa3ff;
     --tipbg: #0b0e12; --tiptext: #ffffff; --tiptemp: #ffa08f; --tiphum: #8fc6ff;
-    --blu: #51cf66; --tipblu: #8ce99a;
+    --blu: #adb5bd; --tipblu: #ced4da;
     --heat: #ffa94d; --alert: #ff6b6b; --ok: #69db7c;
     --day: rgba(255, 212, 59, 0.07); --night: rgba(116, 143, 252, 0.12);
   }
@@ -148,7 +148,7 @@
   <div class="legend">
     <span><i class="swatch" style="background:var(--temp)"></i> Temperature (°F)</span>
     <span><i class="swatch" style="background:var(--hum)"></i> Humidity (%RH)</span>
-    <span id="bluLegend" hidden><i class="swatch" style="background:var(--blu)"></i> BLU sensor (°F solid, %RH dashed)</span>
+    <span>BLU sensor</span>
     <span><i class="swatch" style="background:var(--day);height:10px;outline:1px solid var(--border)"></i> Day</span>
     <span><i class="swatch" style="background:var(--night);height:10px;outline:1px solid var(--border)"></i> Night</span>
     <span><i class="swatch" style="background:var(--heat)"></i> <span id="heaterLegend">Heater plug (raised = on)</span></span>
@@ -194,12 +194,11 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let TEMP, HUM, BLU, GRID, MUTED, HEAT, DAY, NIGHT;
+let TEMP, HUM, GRID, MUTED, HEAT, DAY, NIGHT;
 function refreshColors() {
   const cs = getComputedStyle(document.documentElement);
   TEMP = cs.getPropertyValue('--temp').trim();
   HUM  = cs.getPropertyValue('--hum').trim();
-  BLU  = cs.getPropertyValue('--blu').trim();
   GRID = cs.getPropertyValue('--grid').trim();
   MUTED = cs.getPropertyValue('--muted').trim();
   HEAT = cs.getPropertyValue('--heat').trim();
@@ -245,9 +244,10 @@ function applyFontStep(delta) {
 }
 
 let data = { t: [], tempF: [], hum: [] };      // points inside the window
-// The BLU (Bluetooth) sensor beside the Wi-Fi one, for comparison only.
-let blu = { t: [], tempF: [], hum: [] };       // its points inside the window
-let latestBlu = null;                          // its newest reading
+// The graph follows the BLU (Bluetooth) sensor: `data` and `latest` are its
+// readings. The Wi-Fi sensor is still logged; its numbers appear as text only.
+let wifi = { t: [], tempF: [], hum: [] };      // Wi-Fi points inside the window
+let latestWifi = null;                         // its newest reading
 let heaterOn = [];                             // [[startMs, endMs], ...] heater-on bands
 let heaterKnown = false;                       // false when /api/heater failed
 let schedule = null;                           // { start: "07:00", end: "21:00", tz } from settings
@@ -417,23 +417,24 @@ async function loadData() {
     return;
   }
   const m = raw.t.length;
-  latest = m ? { t: raw.t[m - 1], tempF: raw.tempF[m - 1], hum: raw.hum[m - 1] } : null;
-  data = { t: [], tempF: [], hum: [] };
+  latestWifi = m ? { t: raw.t[m - 1], tempF: raw.tempF[m - 1], hum: raw.hum[m - 1] } : null;
+  wifi = { t: [], tempF: [], hum: [] };
   for (let i = 0; i < m; i++) {
     if (raw.t[i] >= win.t0 && raw.t[i] <= win.t1) {
-      data.t.push(raw.t[i]); data.tempF.push(raw.tempF[i]); data.hum.push(raw.hum[i]);
+      wifi.t.push(raw.t[i]); wifi.tempF.push(raw.tempF[i]); wifi.hum.push(raw.hum[i]);
     }
   }
+  // BLU beacons without humidity are skipped so both lines share every point.
   const b = raw.blu || { t: [], tempF: [], hum: [] };
-  const bm = b.t.length;
-  latestBlu = bm ? { t: b.t[bm - 1], tempF: b.tempF[bm - 1], hum: b.hum[bm - 1] } : null;
-  blu = { t: [], tempF: [], hum: [] };
-  for (let i = 0; i < bm; i++) {
+  const keep = [...b.t.keys()].filter((i) => b.hum[i] != null);
+  const last = keep[keep.length - 1];
+  latest = keep.length ? { t: b.t[last], tempF: b.tempF[last], hum: b.hum[last] } : null;
+  data = { t: [], tempF: [], hum: [] };
+  for (const i of keep) {
     if (b.t[i] >= win.t0 && b.t[i] <= win.t1) {
-      blu.t.push(b.t[i]); blu.tempF.push(b.tempF[i]); blu.hum.push(b.hum[i]);
+      data.t.push(b.t[i]); data.tempF.push(b.tempF[i]); data.hum.push(b.hum[i]);
     }
   }
-  $('bluLegend').hidden = bm === 0;
   const n = data.t.length;
   const empty = $('empty');
   empty.hidden = n > 0;
@@ -444,11 +445,10 @@ async function loadData() {
   if (latest) {
     $('now').innerHTML =
       `now <span class="t">${latest.tempF.toFixed(1)}°F</span> · ` +
-      `<span class="h">${latest.hum.toFixed(1)}%</span>` +
-      (latestBlu
-        ? ` · BLU <span class="b">${latestBlu.tempF.toFixed(1)}°F</span>` +
-          (latestBlu.hum != null ? ` <span class="b">${latestBlu.hum.toFixed(0)}%</span>` : '') +
-          ` (${fmtDiff(latestBlu.tempF - latest.tempF)}°F)`
+      `<span class="h">${latest.hum.toFixed(0)}%</span>` +
+      (latestWifi
+        ? ` · Wi-Fi <span class="b">${latestWifi.tempF.toFixed(1)}°F ${latestWifi.hum.toFixed(0)}%</span>` +
+          ` (${fmtDiff(latestWifi.tempF - latest.tempF)}°F)`
         : '');
   } else {
     $('now').textContent = '—';
@@ -456,14 +456,14 @@ async function loadData() {
   draw();
 }
 
-/** "+1.2" / "-0.4": the BLU sensor's reading minus the Wi-Fi sensor's. */
+/** "+1.2" / "-0.4": the Wi-Fi sensor's reading minus the BLU sensor's. */
 function fmtDiff(d) { return (d >= 0 ? '+' : '') + d.toFixed(1); }
 
-/** Index of the BLU reading nearest `t`, or -1 if none within 10 minutes. */
-function nearestBlu(t) {
+/** Index of the Wi-Fi reading nearest `t`, or -1 if none within 10 minutes. */
+function nearestWifi(t) {
   let best = -1, bestd = 10 * 60000;
-  for (let i = 0; i < blu.t.length; i++) {
-    const dd = Math.abs(blu.t[i] - t);
+  for (let i = 0; i < wifi.t.length; i++) {
+    const dd = Math.abs(wifi.t[i] - t);
     if (dd <= bestd) { bestd = dd; best = i; }
   }
   return best;
@@ -572,10 +572,8 @@ function draw() {
   // Temperature drives the gridlines (10% padding, rounded to clean values);
   // humidity is then fitted onto those SAME lines with its own round step.
   const hiLo = windowHiLo();
-  // Scales cover both sensors so neither line runs off the plot.
-  const bluHum = blu.hum.filter((v) => v != null);
-  const [tLoPad, tHiPad] = paddedRange(data.tempF.concat(blu.tempF), 4); // 10% pad, >= 4 °F
-  const [hLoPad, hHiPad] = paddedRange(data.hum.concat(bluHum), 8);     // >= 8 %RH tall
+  const [tLoPad, tHiPad] = paddedRange(data.tempF, 4); // 10% pad, >= 4 °F
+  const [hLoPad, hHiPad] = paddedRange(data.hum, 8);   // >= 8 %RH tall
   // Fewer target gridlines => humidity fits the shared lines with less empty
   // headroom (each temperature line still gets a matching humidity value).
   const tAxis = niceAxisCover(tLoPad, tHiPad, 5);
@@ -627,10 +625,6 @@ function draw() {
   // series
   drawLine(data.t, data.tempF, yT, TEMP);
   drawLine(data.t, data.hum, yH, HUM);
-  drawLine(blu.t, blu.tempF, yT, BLU);
-  ctx.save(); ctx.setLineDash([5, 4]);
-  drawLine(blu.t.filter((_, i) => blu.hum[i] != null), bluHum, yH, BLU);
-  ctx.restore();
 
   // Mark the most recent sample (all samples when very sparse) so a lone or
   // just-started reading is always visible.
@@ -649,12 +643,6 @@ function draw() {
     ctx.globalAlpha = 1;
     dot(hx, yT(data.tempF[hover]), TEMP);
     dot(hx, yH(data.hum[hover]), HUM);
-    const bi = nearestBlu(data.t[hover]);
-    if (bi >= 0) {
-      const bx = x(blu.t[bi]);
-      dot(bx, yT(blu.tempF[bi]), BLU);
-      if (blu.hum[bi] != null) dot(bx, yH(blu.hum[bi]), BLU);
-    }
   }
 }
 
@@ -924,13 +912,12 @@ function showTipAt(clientX, clientY, touch) {
   tip.innerHTML =
     `${new Date(data.t[best]).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}<br>` +
     `<span class="t">${data.tempF[best].toFixed(1)}°F</span> · ` +
-    `<span class="h">${data.hum[best].toFixed(1)}%</span>` +
+    `<span class="h">${data.hum[best].toFixed(0)}%</span>` +
     (() => {
-      const bi = nearestBlu(data.t[best]);
-      if (bi < 0) return '';
-      return `<br>BLU <span class="b">${blu.tempF[bi].toFixed(1)}°F</span>` +
-        (blu.hum[bi] != null ? ` · <span class="b">${blu.hum[bi].toFixed(0)}%</span>` : '') +
-        ` (${fmtDiff(blu.tempF[bi] - data.tempF[best])}°F)`;
+      const wi = nearestWifi(data.t[best]);
+      if (wi < 0) return '';
+      return `<br>Wi-Fi <span class="b">${wifi.tempF[wi].toFixed(1)}°F · ${wifi.hum[wi].toFixed(0)}%</span>` +
+        ` (${fmtDiff(wifi.tempF[wi] - data.tempF[best])}°F)`;
     })();
   tip.style.opacity = 1;
   // Sit the readout above the pointer, centred on the point, so neither the

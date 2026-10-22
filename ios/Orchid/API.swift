@@ -40,10 +40,30 @@ struct Stats: Decodable, Equatable {
     func window(_ key: String) -> Window? { windows.first { $0.key == key } }
 }
 
+/// One sensor's readings as parallel arrays.
+struct Readings: Decodable, Equatable {
+    let t: [Int64]
+    let tempF: [Double?]
+    let hum: [Double?]
+
+    var points: [Series.Point] {
+        t.indices.map { i in
+            Series.Point(
+                date: Date(milliseconds: t[i]),
+                tempF: i < tempF.count ? tempF[i] : nil,
+                hum: i < hum.count ? hum[i] : nil
+            )
+        }
+    }
+}
+
+/// `/api/data`: the Wi-Fi sensor at the top level, the BLU sensor under `blu`.
+/// The graph follows the BLU sensor; the Wi-Fi sensor is still logged.
 struct Series: Decodable, Equatable {
     let t: [Int64]
     let tempF: [Double?]
     let hum: [Double?]
+    let blu: Readings?
 
     struct Point: Identifiable, Equatable {
         let date: Date
@@ -52,14 +72,15 @@ struct Series: Decodable, Equatable {
         var id: Date { date }
     }
 
-    var points: [Point] {
-        t.indices.map { i in
-            Point(
-                date: Date(milliseconds: t[i]),
-                tempF: i < tempF.count ? tempF[i] : nil,
-                hum: i < hum.count ? hum[i] : nil
-            )
-        }
+    var points: [Point] { Readings(t: t, tempF: tempF, hum: hum).points }
+
+    var bluPoints: [Point] { blu?.points ?? [] }
+
+    /// Newest BLU temperature, with the newest humidity at or before it.
+    var latestBlu: (tempF: Double, hum: Double?)? {
+        guard let last = bluPoints.last(where: { $0.tempF != nil }), let tf = last.tempF else { return nil }
+        let hum = bluPoints.last(where: { $0.date <= last.date && $0.hum != nil })?.hum
+        return (tf, hum)
     }
 }
 

@@ -37,6 +37,10 @@ time axis: temperature (tall, heater-on periods shaded), humidity, and a short
 heater strip drawn as a step line (raised = on). Pull to refresh; auto-refresh
 every 60 s while visible.
 
+**Graph sensor.** The Graph tab plots the BLU H&T Display (`blu` in
+`/api/data`); the Wi-Fi sensor is still logged and still drives the
+thermostat, so the Numbers tab and the status header follow it.
+
 **Settings.** Form with mode (Auto / Off), day start and end, day and night
 minimums, hysteresis, high cutoff, alert threshold, stale-sensor minutes and
 alerts on/off. Save sends only the thermostat fields as a patch; the server
