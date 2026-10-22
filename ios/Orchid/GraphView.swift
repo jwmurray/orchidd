@@ -18,7 +18,8 @@ struct GraphView: View {
     let client: OrchidClient
 
     @AppStorage("graphRange") private var range: GraphRange = .day
-    @State private var points: [Series.Point] = []
+    @State private var points: [Series.Point] = []   // BLU sensor
+    @State private var latest: (tempF: Double, hum: Double?)?
     @State private var heater = HeaterIntervals(intervals: [])
     @State private var status: Status?
     @State private var settings: ThermostatSettings?
@@ -37,10 +38,10 @@ struct GraphView: View {
                     if let error { ErrorBanner(message: error) }
                     if let st = status { header(st) }
 
-                    chartTitle("Temperature", Fmt.temp(status?.tempF), .temp)
+                    chartTitle("Temperature", Fmt.temp(latest?.tempF), .temp)
                     temperatureChart.frame(height: 260)
 
-                    chartTitle("Humidity", Fmt.hum(status?.humidity), .hum)
+                    chartTitle("Humidity", Fmt.hum(latest?.hum), .hum)
                     humidityChart.frame(height: 150)
 
                     chartTitle("Heater plug", status.map(Fmt.heater) ?? "—", .heat)
@@ -152,7 +153,8 @@ struct GraphView: View {
             let (series, intervals, current) = try await (s, h, st)
             let now = Date()
             window = (now.addingTimeInterval(-days * 86400), now)
-            points = series.points
+            points = series.bluPoints
+            latest = series.latestBlu
             heater = intervals
             status = current
             settings = try? await client.settings()

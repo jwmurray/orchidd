@@ -54,6 +54,21 @@ final class OrchidTests: XCTestCase {
         XCTAssertEqual(p[2].tempF, 70.7)
     }
 
+    func testSeriesDecodesTheBluSensor() throws {
+        let s = try decode(Series.self, """
+        {"t":[1792238402000],"tempF":[70.9],"hum":[60.8],
+         "blu":{"t":[1792238400000,1792238460000],"tempF":[70.3,70.4],"hum":[66.0,null]}}
+        """)
+        XCTAssertEqual(s.bluPoints.count, 2)
+        XCTAssertEqual(s.bluPoints[1].tempF, 70.4)
+        XCTAssertNil(s.bluPoints[1].hum)
+        XCTAssertEqual(s.latestBlu?.tempF, 70.4)
+        XCTAssertEqual(s.latestBlu?.hum, 66.0, "humidity from the newest beacon that has one")
+        let none = try decode(Series.self, #"{"t":[],"tempF":[],"hum":[]}"#)
+        XCTAssertTrue(none.bluPoints.isEmpty)
+        XCTAssertNil(none.latestBlu)
+    }
+
     func testHeaterClipsToWindowAndDropsOutside() {
         let h = HeaterIntervals(intervals: [[0, 2000], [5000, 7000], [9000, 12000], [20000, 21000], [1]])
         let from = Date(milliseconds: 1000), to = Date(milliseconds: 10000)
