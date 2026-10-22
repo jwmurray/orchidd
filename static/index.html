@@ -559,7 +559,8 @@ function draw() {
   const padL = 56 + fontStep * 2, padR = 56 + fontStep * 2, padT = 12;
   // Two-line x labels (time + date) need a taller bottom band — always on
   // long ranges, and on short ones whenever the window crosses midnight.
-  const padB = wspanDays > 1.5 || crossesDay ? axisFs * 2 + 20 : axisFs + 17;
+  const edgeLabels = GRID_MODE === 'daynight' && schedule && schedule.start && schedule.end;
+  const padB = edgeLabels || wspanDays > 1.5 || crossesDay ? axisFs * 2 + 20 : axisFs + 17;
   const W = cssW - padL - padR, H = cssH - padT - padB;
   if (n === 0 || W <= 0 || H <= 0) { geo = null; return; }
 
@@ -605,36 +606,14 @@ function draw() {
     ctx.fillText((hAxis.min + i * hAxis.step).toFixed(hDec) + '%', padL + W + 6, yy);
   }
 
-  // x-axis: each tick snaps to the nearest half hour so the label reads a
-  // clean clock time, and a vertical gridline (same weight as the horizontal
-  // ones) marks exactly where that time falls. Ranges past ~1.5 days add the
-  // date on a second line since the times alone would be ambiguous; short
-  // ranges add it only on the first tick of a new day, so a midnight
-  // crossing is visible without repeating the date everywhere.
+  // x-axis: with a day/night schedule, label each day/night switch with its
+  // time and date, so the labels line up with the shading. A label that would
+  // overlap the one before it is skipped (long ranges have many switches).
+  // Without a schedule, fall back to evenly spaced half-hour ticks.
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  const labels = 6;
-  const HALF_HOUR = 30 * 60 * 1000;
-  const twoLine = tSpan > 36 * 3600 * 1000;
-  const drawn = new Set();
-  let prevTickDay = null;
-  for (let i = 0; i <= labels; i++) {
-    const tt = Math.round((t0 + tSpan * i / labels) / HALF_HOUR) * HALF_HOUR;
-    if (tt < t0 || tt > t1 || drawn.has(tt)) continue; // snapped out of range
-    drawn.add(tt);
-    const xx = x(tt);
-    ctx.strokeStyle = GRID;
-    ctx.beginPath();
-    if (GRID_MODE === 'ticks') { ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + H); }
-    else { ctx.moveTo(xx, padT + H); ctx.lineTo(xx, padT + H + 4); } // tick mark only
-    ctx.stroke();
-    const d = new Date(tt);
-    ctx.fillStyle = MUTED;
-    ctx.fillText(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), xx, padT + H + 6);
-    const newDay = prevTickDay !== null && d.toDateString() !== prevTickDay;
-    if (twoLine || newDay)
-      ctx.fillText(d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }), xx, padT + H + 9 + axisFs);
-    prevTickDay = d.toDateString();
-  }
+  const inRange = edges.filter((e) => e.t >= t0 && e.t <= t1);
+  if (GRID_MODE === 'daynight' && inRange.length) drawEdgeLabels(inRange, x, padT, H, axisFs);
+  else drawTimeTicks(t0, t1, tSpan, x, padT, H, axisFs);
 
   if (GRID_MODE === 'daynight') drawDayNightLines(edges, x, t0, t1, padT, H);
 
@@ -794,6 +773,54 @@ function drawDayNight(edges, x, t0, t1, padT, H) {
     ctx.fillRect(x(t0), padT, x(Math.min(edges[0].t, t1)) - x(t0), H);
   }
   ctx.restore();
+}
+
+// Evenly spaced ticks snapped to the nearest half hour, with the date on a
+// second line on ranges past ~1.5 days or on the first tick of a new day.
+function drawTimeTicks(t0, t1, tSpan, x, padT, H, axisFs) {
+  const labels = 6;
+  const HALF_HOUR = 30 * 60 * 1000;
+  const twoLine = tSpan > 36 * 3600 * 1000;
+  const drawn = new Set();
+  let prevTickDay = null;
+  for (let i = 0; i <= labels; i++) {
+    const tt = Math.round((t0 + tSpan * i / labels) / HALF_HOUR) * HALF_HOUR;
+    if (tt < t0 || tt > t1 || drawn.has(tt)) continue; // snapped out of range
+    drawn.add(tt);
+    const xx = x(tt);
+    ctx.strokeStyle = GRID;
+    ctx.beginPath();
+    if (GRID_MODE === 'ticks') { ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + H); }
+    else { ctx.moveTo(xx, padT + H); ctx.lineTo(xx, padT + H + 4); } // tick mark only
+    ctx.stroke();
+    const d = new Date(tt);
+    ctx.fillStyle = MUTED;
+    ctx.fillText(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), xx, padT + H + 6);
+    const newDay = prevTickDay !== null && d.toDateString() !== prevTickDay;
+    if (twoLine || newDay)
+      ctx.fillText(d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }), xx, padT + H + 9 + axisFs);
+    prevTickDay = d.toDateString();
+  }
+}
+
+// One label per day/night switch: clock time, then the date beneath.
+function drawEdgeLabels(edges, x, padT, H, axisFs) {
+  const tz = schedule.tz || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let lastRight = -Infinity;
+  for (const { t } of edges) {
+    const d = new Date(t);
+    const time = d.toLocaleTimeString([], { timeZone: tz, hour: 'numeric', minute: '2-digit' });
+    const date = d.toLocaleDateString([], { timeZone: tz, month: 'numeric', day: 'numeric' });
+    const xx = x(t);
+    const half = Math.max(ctx.measureText(time).width, ctx.measureText(date).width) / 2;
+    ctx.strokeStyle = GRID;
+    ctx.beginPath(); ctx.moveTo(xx, padT + H); ctx.lineTo(xx, padT + H + 4); ctx.stroke();
+    if (xx - half < lastRight + 8) continue;
+    ctx.fillStyle = MUTED;
+    ctx.fillText(time, xx, padT + H + 6);
+    ctx.fillText(date, xx, padT + H + 9 + axisFs);
+    lastRight = xx + half;
+  }
 }
 
 function drawDayNightLines(edges, x, t0, t1, padT, H) {
