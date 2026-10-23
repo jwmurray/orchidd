@@ -445,10 +445,13 @@ pub struct ControllerStatus {
     pub last_run_ts: Option<i64>,
 }
 
-/// Newest reading: (unix ts, temp °C, humidity %RH).
+/// Newest BLU sensor reading: (unix ts, temp °C, humidity %RH). The
+/// thermostat, alerts and status follow the BLU H&T Display; the Wi-Fi
+/// sensor is still logged but no longer drives anything.
 pub fn latest_reading(conn: &Connection) -> Option<(i64, f64, f64)> {
     conn.query_row(
-        "SELECT ts, temp_c, humidity FROM readings ORDER BY ts DESC LIMIT 1",
+        "SELECT ts, temp_c, humidity FROM blu_readings WHERE humidity IS NOT NULL
+         ORDER BY ts DESC LIMIT 1",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
@@ -1062,20 +1065,38 @@ mod tests {
     fn test_db() -> Arc<Mutex<Connection>> {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::READINGS_SCHEMA).unwrap();
+        conn.execute_batch(crate::blu::BLU_SCHEMA).unwrap();
         init_schema(&conn).unwrap();
         seed_settings(&conn, &s()).unwrap();
         Arc::new(Mutex::new(conn))
     }
 
+    /// A BLU sensor reading: the sensor the thermostat follows.
     fn add_reading(db: &Arc<Mutex<Connection>>, ts: i64, temp_f: f64) {
         let temp_c = (temp_f - 32.0) * 5.0 / 9.0;
         db.lock()
             .unwrap()
             .execute(
-                "INSERT INTO readings (ts, temp_c, humidity) VALUES (?1, ?2, 50.0)",
+                "INSERT INTO blu_readings (ts, temp_c, humidity) VALUES (?1, ?2, 50.0)",
                 rusqlite::params![ts, temp_c],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn thermostat_follows_the_blu_sensor_not_the_wifi_one() {
+        let db = test_db();
+        add_reading(&db, NOON - 60, 70.0);
+        let conn = db.lock().unwrap();
+        // A newer Wi-Fi reading (the sensor is leaving the room) is ignored.
+        conn.execute(
+            "INSERT INTO readings (ts, temp_c, humidity) VALUES (?1, 30.0, 40.0)",
+            [NOON],
+        )
+        .unwrap();
+        let (ts, temp_c, _) = latest_reading(&conn).unwrap();
+        assert_eq!(ts, NOON - 60);
+        assert!((c_to_f(temp_c) - 70.0).abs() < 1e-9);
     }
 
     // 2026-10-12 12:00 MDT (daytime, setpoint 75).
