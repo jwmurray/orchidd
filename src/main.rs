@@ -508,8 +508,9 @@ async fn api_stats(State(state): State<AppState>) -> impl IntoResponse {
             let cutoff = now - (days * 86400.0) as i64;
             let row: (Option<f64>, Option<f64>, Option<f64>, Option<f64>, i64) = db
                 .query_row(
+                    // The BLU sensor: the one graphed and the one the thermostat follows.
                     "SELECT MIN(temp_c), MAX(temp_c), MIN(humidity), MAX(humidity), COUNT(*)
-                     FROM readings WHERE ts >= ?1",
+                     FROM blu_readings WHERE ts >= ?1",
                     [cutoff],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
