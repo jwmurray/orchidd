@@ -30,6 +30,9 @@ extension Color {
     static let temp = Color(red: 0.84, green: 0.20, blue: 0.16)
     static let hum = Color(red: 0.11, green: 0.42, blue: 0.85)
     static let heat = Color(red: 0.94, green: 0.55, blue: 0.0)
+    /// Graph shading, matching the web page's day and night bands.
+    static let day = Color(red: 0.99, green: 0.93, blue: 0.80).opacity(0.7)
+    static let night = Color(red: 0.91, green: 0.92, blue: 0.99).opacity(0.8)
 }
 
 /// Shared formatting so the three tabs read the same.
