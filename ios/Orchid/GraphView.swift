@@ -23,6 +23,7 @@ struct GraphView: View {
     @State private var heater = HeaterIntervals(intervals: [])
     @State private var status: Status?
     @State private var settings: ThermostatSettings?
+    @State private var schedule: Schedule?
     @State private var window = (from: Date(), to: Date())
     @State private var error: String?
 
@@ -86,11 +87,23 @@ struct GraphView: View {
 
     private var onPeriods: [ClosedRange<Date>] { heater.clipped(from: window.from, to: window.to) }
 
+    private var bands: [DayNight.Band] {
+        guard let schedule else { return [] }
+        return DayNight.bands(from: window.from, to: window.to, schedule: schedule)
+    }
+
+    /// Where day turns to night and back: these get the x-axis labels.
+    private var edges: [Date] { bands.dropFirst().map(\.start) }
+
     private var temperatureChart: some View {
         Chart {
+            ForEach(Array(bands.enumerated()), id: \.offset) { _, b in
+                RectangleMark(xStart: .value("From", b.start), xEnd: .value("To", b.end))
+                    .foregroundStyle(b.isDay ? Color.day : Color.night)
+            }
             ForEach(Array(onPeriods.enumerated()), id: \.offset) { _, r in
                 RectangleMark(xStart: .value("On", r.lowerBound), xEnd: .value("Off", r.upperBound))
-                    .foregroundStyle(Color.heat.opacity(0.15))
+                    .foregroundStyle(Color.heat.opacity(0.28))
             }
             ForEach(points) { p in
                 if let v = p.tempF {
@@ -135,12 +148,25 @@ struct GraphView: View {
         .chartXAxis { timeAxis }
     }
 
+    @AxisContentBuilder
     private var timeAxis: some AxisContent {
-        AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-            AxisGridLine()
-            AxisValueLabel(format: range == .week
-                ? .dateTime.month(.defaultDigits).day()
-                : .dateTime.hour())
+        if edges.isEmpty {
+            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                AxisGridLine()
+                AxisValueLabel(format: range == .week
+                    ? .dateTime.month(.defaultDigits).day()
+                    : .dateTime.hour())
+            }
+        } else {
+            let tz = schedule?.timeZone ?? .current
+            AxisMarks(values: edges) { v in
+                AxisGridLine()
+                AxisValueLabel(centered: true, collisionResolution: .greedy) {
+                    if let d = v.as(Date.self) {
+                        Text(DayNight.label(d, tz: tz)).multilineTextAlignment(.center)
+                    }
+                }
+            }
         }
     }
 
@@ -158,6 +184,7 @@ struct GraphView: View {
             heater = intervals
             status = current
             settings = try? await client.settings()
+            schedule = try? await client.schedule()
             error = nil
         } catch {
             self.error = error.localizedDescription

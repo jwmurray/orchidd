@@ -162,6 +162,76 @@ extension Date {
 }
 
 /// "07:00" <-> a Date today at that time, for the DatePicker.
+/// The day/night schedule, read from /api/settings, for shading the graph.
+struct Schedule: Decodable, Equatable {
+    var dayStart: String
+    var dayEnd: String
+    var timezone: String
+
+    enum CodingKeys: String, CodingKey {
+        case dayStart = "day_start", dayEnd = "day_end", timezone
+    }
+
+    var timeZone: TimeZone { TimeZone(identifier: timezone) ?? .current }
+}
+
+/// Day and night stretches of a time window, as the web graph shades them.
+enum DayNight {
+    struct Band: Equatable {
+        let start: Date
+        let end: Date
+        let isDay: Bool
+    }
+
+    static func bands(from: Date, to: Date, schedule: Schedule) -> [Band] {
+        guard from < to else { return [] }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = schedule.timeZone
+        let start = minutes(schedule.dayStart), end = minutes(schedule.dayEnd)
+        func isDay(_ d: Date) -> Bool {
+            let c = cal.dateComponents([.hour, .minute], from: d)
+            let m = (c.hour ?? 0) * 60 + (c.minute ?? 0)
+            return start < end ? (m >= start && m < end) : (m >= start || m < end)
+        }
+        var edges: [Date] = []
+        var day = cal.startOfDay(for: from.addingTimeInterval(-86_400))
+        while day <= to {
+            for m in [start, end] {
+                if let d = cal.date(bySettingHour: m / 60, minute: m % 60, second: 0, of: day),
+                   d > from, d < to {
+                    edges.append(d)
+                }
+            }
+            guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        var out: [Band] = []
+        var cur = from
+        for e in edges.sorted() {
+            out.append(Band(start: cur, end: e, isDay: isDay(cur)))
+            cur = e
+        }
+        out.append(Band(start: cur, end: to, isDay: isDay(cur)))
+        return out
+    }
+
+    /// "9:00 PM\n10/23" in the schedule's time zone.
+    static func label(_ d: Date, tz: TimeZone) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US")
+        f.timeZone = tz
+        f.dateFormat = "h:mm a"
+        let time = f.string(from: d)
+        f.dateFormat = "M/d"
+        return "\(time)\n\(f.string(from: d))"
+    }
+
+    private static func minutes(_ hhmm: String) -> Int {
+        let p = hhmm.split(separator: ":").compactMap { Int($0) }
+        return (p.first ?? 0) * 60 + (p.count > 1 ? p[1] : 0)
+    }
+}
+
 enum HHMM {
     static func date(from text: String, calendar: Calendar = .current, on day: Date = Date()) -> Date {
         let parts = text.split(separator: ":").compactMap { Int($0) }
@@ -219,6 +289,7 @@ struct OrchidClient {
     func series(days: Double) async throws -> Series { try await get("/api/data?days=\(days)") }
     func heater(days: Double) async throws -> HeaterIntervals { try await get("/api/heater?days=\(days)") }
     func settings() async throws -> ThermostatSettings { try await get("/api/settings") }
+    func schedule() async throws -> Schedule { try await get("/api/settings") }
 
     func save(_ settings: ThermostatSettings) async throws -> ThermostatSettings {
         var req = URLRequest(url: try url("/api/settings"))

@@ -144,4 +144,20 @@ final class OrchidTests: XCTestCase {
             XCTAssertEqual(error.localizedDescription, APIError.badAddress.localizedDescription)
         }
     }
+
+    func testDayNightBandsAndEdgesFollowTheScheduleInItsTimeZone() throws {
+        let tz = TimeZone(identifier: "America/Denver")!
+        let sched = try decode(Schedule.self, """
+        {"day_start":"07:00","day_end":"21:00","timezone":"America/Denver","mode":"auto"}
+        """)
+        // 2026-10-23 07:56 MDT → 2026-10-24 07:56 MDT.
+        let from = Date(timeIntervalSince1970: 1_792_763_760)
+        let to = from.addingTimeInterval(86_400)
+        let bands = DayNight.bands(from: from, to: to, schedule: sched)
+        XCTAssertEqual(bands.map(\.isDay), [true, false, true])
+        XCTAssertEqual(bands.first?.start, from)
+        XCTAssertEqual(bands.last?.end, to)
+        let edges = bands.dropFirst().map(\.start)
+        XCTAssertEqual(edges.map { DayNight.label($0, tz: tz) }, ["9:00 PM\n10/23", "7:00 AM\n10/24"])
+    }
 }
