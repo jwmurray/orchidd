@@ -57,7 +57,7 @@ impl Config {
             }
         };
         let hot_f = match var("ORCHID_HOT_F") {
-            None => 90.0,
+            None => 85.0,
             Some(v) => v
                 .parse::<f64>()
                 .ok()

@@ -44,11 +44,16 @@ enum Fmt {
         return String(format: "%.1f h ago", s / 3600)
     }
 
+    /// Below this the plug is on but nothing is plugged into it.
+    static let heaterDrawMinW = 5.0
+
     static func heater(_ st: Status) -> String {
         if st.mode == "off" { return "Off (mode off)" }
         guard let on = st.heaterOn else { return "Unknown" }
         guard on else { return "Off" }
-        return st.apowerW.map { "On · \(Int($0.rounded())) W" } ?? "On"
+        guard let w = st.apowerW else { return "On" }
+        if w < heaterDrawMinW { return "Plug activated — heater not plugged in" }
+        return "On · \(Int(w.rounded())) W"
     }
 }
 

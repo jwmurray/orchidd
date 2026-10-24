@@ -65,11 +65,23 @@ pub struct Settings {
     pub alert_email: String,
     #[serde(default = "default_true")]
     pub alerts_enabled: bool,
+    /// Text at once when the room goes over this.
+    #[serde(default = "default_alert_high")]
+    pub alert_high_f: f64,
+    /// Text at once when the room goes under this, whatever the thermostat is doing.
+    #[serde(default = "default_alert_low")]
+    pub alert_low_f: f64,
     pub mode: String,
 }
 
 fn default_alert_below() -> f64 {
     1.5
+}
+fn default_alert_high() -> f64 {
+    85.0
+}
+fn default_alert_low() -> f64 {
+    55.0
 }
 fn default_stale_minutes() -> u32 {
     20
