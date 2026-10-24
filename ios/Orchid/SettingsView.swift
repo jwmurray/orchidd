@@ -77,6 +77,8 @@ struct SettingsView: View {
         Section("Alerts") {
             Toggle("Alerts on", isOn: bind(\.alertsEnabled))
             degrees("Alert when below setpoint by", \.alertBelowF, 0.5...10)
+            degrees("Alert when over", \.alertHighF, 60...110)
+            degrees("Alert when under", \.alertLowF, 32...75)
             Stepper(value: bind(\.staleMinutes), in: 5...240, step: 5) {
                 LabeledContent("Sensor stale after", value: "\(draft?.staleMinutes ?? 0) min")
             }

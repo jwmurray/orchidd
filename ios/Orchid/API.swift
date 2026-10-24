@@ -134,6 +134,8 @@ struct ThermostatSettings: Codable, Equatable {
     var staleMinutes: Int
     var alertBelowF: Double
     var alertsEnabled: Bool
+    var alertHighF: Double
+    var alertLowF: Double
 
     enum CodingKeys: String, CodingKey {
         case mode, dayStart = "day_start", dayEnd = "day_end"
@@ -141,6 +143,7 @@ struct ThermostatSettings: Codable, Equatable {
         case hysteresisF = "hysteresis_f", maxTempF = "max_temp_f"
         case staleMinutes = "stale_minutes", alertBelowF = "alert_below_f"
         case alertsEnabled = "alerts_enabled"
+        case alertHighF = "alert_high_f", alertLowF = "alert_low_f"
     }
 }
 

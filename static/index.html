@@ -175,6 +175,8 @@
         <div class="sgroup">Safety &amp; alerts</div>
         <label>Sensor stale after (minutes)<input name="stale_minutes" type="number" step="1" min="6" max="240" inputmode="numeric" /></label>
         <label>Alert when below setpoint by (°F)<input name="alert_below_f" type="number" step="0.5" min="0" max="20" inputmode="decimal" /></label>
+        <label>High temperature alert, over (°F)<input name="alert_high_f" type="number" step="0.5" min="32" max="120" inputmode="decimal" /></label>
+        <label>Low temperature alert, under (°F)<input name="alert_low_f" type="number" step="0.5" min="32" max="120" inputmode="decimal" /></label>
         <label class="check"><input name="alerts_enabled" type="checkbox" /> Alerts enabled</label>
         <label>Alert phone<input name="alert_phone" type="tel" /></label>
         <label>Alert email<input name="alert_email" type="email" autocapitalize="off" /></label>
@@ -979,6 +981,8 @@ async function loadStatus() {
     chips.push(`<span class="chip">Heater <b>OFF</b> (mode off)</span>`);
   } else if (st.heater_on == null) {
     chips.push(`<span class="chip">Heater <b>unknown</b></span>`);
+  } else if (st.heater_on && st.apower_w != null && st.apower_w < HEATER_DRAW_MIN_W) {
+    chips.push(`<span class="chip">Plug <b>activated</b> — heater not plugged in</span>`);
   } else if (st.heater_on) {
     const w = st.apower_w != null ? ` ${Math.round(st.apower_w)} W` : '';
     chips.push(`<span class="chip on">Heater <b>ON${w}</b></span>`);
@@ -999,8 +1003,11 @@ async function loadStatus() {
   $('status').innerHTML = chips.join('');
 }
 
+// Below this the plug is on but nothing is plugged into it.
+const HEATER_DRAW_MIN_W = 5;
+
 // ---- thermostat settings --------------------------------------------------
-const NUMERIC = ['day_setpoint_f', 'night_setpoint_f', 'hysteresis_f', 'max_temp_f', 'stale_minutes', 'alert_below_f', 'sensor_temp_offset_f', 'sensor_humidity_offset'];
+const NUMERIC = ['day_setpoint_f', 'night_setpoint_f', 'hysteresis_f', 'max_temp_f', 'stale_minutes', 'alert_below_f', 'alert_high_f', 'alert_low_f', 'sensor_temp_offset_f', 'sensor_humidity_offset'];
 function smsg(text, cls) { const m = $('smsg'); m.textContent = text || ''; m.className = cls || ''; }
 
 async function loadSettings() {

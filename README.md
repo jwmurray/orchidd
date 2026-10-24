@@ -172,6 +172,8 @@ edited from the web page's **Thermostat settings** panel or the API.
 | `max_temp_f`       | `85.0`                | above both setpoints + hysteresis, ≤ 120      |
 | `stale_minutes`    | `20`                  | 6–240                                         |
 | `alert_below_f`    | `1.5`                 | 0–20                                          |
+| `alert_high_f`     | `85.0`                | 32–120; texts at once when over, hourly repeat |
+| `alert_low_f`      | `55.0`                | 32–120, below `alert_high_f`; same, when under |
 | `alert_phone`      | `""`                  | stored only                                   |
 | `alert_email`      | `""`                  | stored only                                   |
 | `alerts_enabled`   | `true`                | stored only                                   |

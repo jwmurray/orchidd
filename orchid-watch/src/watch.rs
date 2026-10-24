@@ -57,7 +57,7 @@ impl Default for WatchConfig {
         WatchConfig {
             warmup_min: 120,
             repeat_min: 60,
-            hot_f: 90.0,
+            hot_f: 85.0,
             relay_stale_min: 10,
         }
     }
@@ -75,6 +75,7 @@ pub enum Condition {
     PlugUnreachable,
     BelowSetpoint,
     TooHot,
+    TooCold,
     /// Rose Marie's iMessage relay has stopped checking in. Admin channel only.
     RelayDown,
 }
@@ -82,12 +83,13 @@ pub enum Condition {
 impl Condition {
     /// The conditions read off orchidd's own alert state. `RelayDown` is not
     /// among them: it is evaluated only when the admin channel exists.
-    pub const ALL: [Condition; 5] = [
+    pub const ALL: [Condition; 6] = [
         Condition::OrchiddDown,
         Condition::SensorStale,
         Condition::PlugUnreachable,
         Condition::BelowSetpoint,
         Condition::TooHot,
+        Condition::TooCold,
     ];
 
     /// How long the condition must hold, unbroken, before anyone is told.
@@ -96,7 +98,17 @@ impl Condition {
             Condition::BelowSetpoint => 10 * 60,
             // The staleness window is already the debounce.
             Condition::RelayDown => 0,
+            // The room is outside the safe range: say so now.
+            Condition::TooHot | Condition::TooCold => 0,
             _ => 5 * 60,
+        }
+    }
+
+    /// How often a standing alert is repeated.
+    pub fn repeat_secs(self, cfg: &WatchConfig) -> i64 {
+        match self {
+            Condition::TooHot | Condition::TooCold => 60 * 60,
+            _ => cfg.repeat_min * 60,
         }
     }
 
@@ -107,6 +119,7 @@ impl Condition {
             Condition::PlugUnreachable => "plug_unreachable",
             Condition::BelowSetpoint => "below_setpoint",
             Condition::TooHot => "too_hot",
+            Condition::TooCold => "too_cold",
             Condition::RelayDown => "relay_down",
         }
     }
@@ -301,7 +314,19 @@ pub fn derive(
         Some("plug_unreachable") | Some("sensor_stale") => Unknown,
         _ => Clear,
     };
+    let cold = match (s.temp_f, settings) {
+        (Some(t), Some(st)) if fresh => {
+            if t < st.alert_low_f {
+                Raised
+            } else {
+                Clear
+            }
+        }
+        _ => Unknown,
+    };
+    // Too cold says it all; a below-setpoint text on top would be noise.
     let expected = s.mode == "off"
+        || cold == Raised
         || (s.period == "day" && settings.is_some_and(|st| in_warmup(now, st, cfg.warmup_min)));
     out.insert(
         Condition::BelowSetpoint,
@@ -316,7 +341,7 @@ pub fn derive(
         Condition::TooHot,
         match s.temp_f {
             Some(t) if fresh => {
-                if t >= cfg.hot_f {
+                if t > settings.map_or(cfg.hot_f, |st| st.alert_high_f) {
                     Raised
                 } else {
                     Clear
@@ -325,6 +350,7 @@ pub fn derive(
             _ => Unknown,
         },
     );
+    out.insert(Condition::TooCold, cold);
     out
 }
 
@@ -361,7 +387,7 @@ const HEATER_DRAW_MIN_W: f64 = 5.0;
 fn heater_state(s: &Status) -> Option<String> {
     match (s.heater_on, s.apower_w) {
         (Some(true), Some(w)) if w < HEATER_DRAW_MIN_W => {
-            Some(format!("plug activated — heater not plugged in ({w:.0} W)"))
+            Some("plug activated — heater not plugged in".into())
         }
         (Some(true), Some(w)) => Some(format!("heater ON ({w:.0} W)")),
         (Some(true), None) => Some("heater ON".into()),
@@ -408,7 +434,7 @@ pub fn compose(cond: Condition, kind: Kind, cx: &Ctx) -> (String, String) {
             Condition::OrchiddDown => "Orchid monitor back online",
             Condition::SensorStale => "Sensor reporting again",
             Condition::PlugUnreachable => "Heater plug answering again",
-            Condition::BelowSetpoint | Condition::TooHot => "Back to normal",
+            Condition::BelowSetpoint | Condition::TooHot | Condition::TooCold => "Back to normal",
             Condition::RelayDown => unreachable!("composed by compose_relay"),
         };
         let mut msg = format!("{lead}: {temp_txt}{heater}.");
@@ -481,14 +507,28 @@ pub fn compose(cond: Condition, kind: Kind, cx: &Ctx) -> (String, String) {
         Condition::RelayDown => unreachable!("composed by compose_relay"),
         Condition::TooHot => {
             let s = cx.status.expect("too_hot needs a status");
-            let t = temp.unwrap_or(cx.cfg.hot_f);
+            let high = cx
+                .state
+                .settings
+                .as_ref()
+                .map_or(cx.cfg.hot_f, |st| st.alert_high_f);
+            let t = temp.unwrap_or(high);
             (
                 format!("Orchid room {t:.1}°F"),
                 format!(
-                    "Too hot — {}° or more.{} Unplug the heater if it stays on.",
-                    deg(cx.cfg.hot_f),
+                    "Too hot — over {}°.{} Unplug the heater if it stays on.",
+                    deg(high),
                     heater_sentence(s)
                 ),
+            )
+        }
+        Condition::TooCold => {
+            let s = cx.status.expect("too_cold needs a status");
+            let low = cx.state.settings.as_ref().map_or(55.0, |st| st.alert_low_f);
+            let t = temp.unwrap_or(low);
+            (
+                format!("Orchid room {t:.1}°F"),
+                format!("Too cold — below {}°.{}", deg(low), heater_sentence(s)),
             )
         }
     };
@@ -692,7 +732,6 @@ impl Watcher {
             .as_ref()
             .is_none_or(|s| s.alerts_enabled);
         let recipients = self.recipients();
-        let repeat = self.cfg.repeat_min * 60;
         let mut outgoing = Vec::new();
 
         for (cond, r) in &readings {
@@ -702,7 +741,9 @@ impl Watcher {
             for (ch, to) in &self.recipients_for(*cond, &recipients) {
                 let kind = match (qualified, *r, cs.sent.get(ch)) {
                     (true, _, None) => Some(Kind::Alert),
-                    (true, _, Some(&last)) if now - last >= repeat => Some(Kind::Repeat),
+                    (true, _, Some(&last)) if now - last >= cond.repeat_secs(&self.cfg) => {
+                        Some(Kind::Repeat)
+                    }
                     (_, Reading::Clear, Some(_)) => Some(Kind::Recovery),
                     _ => None,
                 };
@@ -935,6 +976,8 @@ mod tests {
             alert_phone: "(801) 555-0101".into(),
             alert_email: "rm@example.com".into(),
             alerts_enabled: true,
+            alert_high_f: 85.0,
+            alert_low_f: 55.0,
             mode: "auto".into(),
         }
     }
@@ -1071,7 +1114,7 @@ mod tests {
         assert_eq!(
             sms(&w)[0].1,
             "8.4° below the 75° day setting. \
-             Plug activated — heater not plugged in (0 W)."
+             Plug activated — heater not plugged in."
         );
         let mut on = ok_status(75.5, "day", 75.0);
         on.heater_on = Some(true);
@@ -1079,7 +1122,7 @@ mod tests {
         run(&w, &mut wt, 1);
         assert_eq!(
             sms(&w)[1].1,
-            "Back to normal: 75.5°F, plug activated — heater not plugged in (0 W)."
+            "Back to normal: 75.5°F, plug activated — heater not plugged in."
         );
     }
 
@@ -1160,21 +1203,63 @@ mod tests {
     }
 
     #[test]
-    fn too_hot_after_five_minutes() {
+    fn too_hot_alerts_at_once_over_the_settings_high_and_repeats_hourly() {
         let (w, mut wt) = rig(MIDNIGHT_DENVER + 2 * H, false);
-        let mut st = ok_status(91.3, "night", 60.0);
-        st.heater_on = Some(true);
-        st.apower_w = Some(905.0);
-        w.borrow_mut().status = Some(st);
-        run(&w, &mut wt, 5);
-        assert!(sms(&w).is_empty());
+        wt.cfg.repeat_min = 240;
+        w.borrow_mut().settings.as_mut().unwrap().alert_high_f = 85.0;
+        w.borrow_mut().status = Some(ok_status(85.0, "night", 60.0));
+        run(&w, &mut wt, 2);
+        assert!(sms(&w).is_empty(), "85 is not over 85");
+        w.borrow_mut().status = Some(ok_status(85.4, "night", 60.0));
         run(&w, &mut wt, 1);
         let s = sms(&w);
+        assert_eq!(s.len(), 1, "immediate");
+        assert_eq!(s[0].0, "Orchid room 85.4°F");
+        assert_eq!(
+            s[0].1,
+            "Too hot — over 85°. Heater is OFF. Unplug the heater if it stays on."
+        );
+        run(&w, &mut wt, 60);
+        assert_eq!(
+            sms(&w).len(),
+            2,
+            "repeats after 60 min, not the 240 min repeat"
+        );
+        assert_eq!(sms(&w)[1].0, "Still: Orchid room 85.4°F");
+    }
+
+    #[test]
+    fn too_cold_alerts_at_once_under_the_settings_low_and_repeats_hourly() {
+        let (w, mut wt) = rig(MIDNIGHT_DENVER + 2 * H, false);
+        wt.cfg.repeat_min = 240;
+        w.borrow_mut().settings.as_mut().unwrap().alert_low_f = 55.0;
+        let mut st = below(54.6, "night", 60.0);
+        st.mode = "off".into();
+        st.heater_on = Some(false);
+        w.borrow_mut().status = Some(st);
+        run(&w, &mut wt, 1);
+        let s = sms(&w);
+        assert_eq!(s.len(), 1, "immediate, even with the thermostat off");
+        assert_eq!(s[0].0, "Orchid room 54.6°F");
+        assert_eq!(s[0].1, "Too cold — below 55°. Heater is OFF.");
+        run(&w, &mut wt, 59);
+        assert_eq!(sms(&w).len(), 1, "no below-setpoint text on top of it");
+        run(&w, &mut wt, 1);
+        assert_eq!(sms(&w).len(), 2);
+        assert_eq!(sms(&w)[1].0, "Still: Orchid room 54.6°F");
+        w.borrow_mut().status = Some(ok_status(56.0, "night", 60.0));
+        run(&w, &mut wt, 1);
+        assert_eq!(sms(&w)[2].1, "Back to normal: 56.0°F, heater OFF.");
+    }
+
+    #[test]
+    fn too_cold_masks_the_below_setpoint_text() {
+        let (w, mut wt) = rig(MIDNIGHT_DENVER + 2 * H, false);
+        w.borrow_mut().status = Some(below(54.0, "night", 60.0));
+        run(&w, &mut wt, 15);
+        let s = sms(&w);
         assert_eq!(s.len(), 1);
-        assert_eq!(s[0].0, "Orchid room 91.3°F");
-        assert!(s[0]
-            .1
-            .starts_with("Too hot — 90° or more. Heater is ON (905 W)."));
+        assert_eq!(s[0].1, "Too cold — below 55°. Heater is ON (905 W).");
     }
 
     #[test]

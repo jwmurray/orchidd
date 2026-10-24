@@ -29,6 +29,13 @@ final class OrchidTests: XCTestCase {
         XCTAssertEqual(Fmt.heater(st), "On · 1496 W")
     }
 
+    func testPlugOnDrawingNothingSaysTheHeaterIsNotPluggedIn() throws {
+        let st = try decode(Status.self, """
+        {"heater_on":true,"apower_w":0.0,"mode":"auto","period":"day","setpoint_f":75}
+        """)
+        XCTAssertEqual(Fmt.heater(st), "Plug activated — heater not plugged in")
+    }
+
     func testStatsWindowLookup() throws {
         let stats = try decode(Stats.self, """
         {"unit":"F","windows":[
@@ -113,14 +120,18 @@ final class OrchidTests: XCTestCase {
         let s = try decode(ThermostatSettings.self, """
         {"mode":"auto","plug_url":"http://192.168.0.30","timezone":"America/Denver","day_start":"07:00",
          "day_end":"21:00","day_setpoint_f":75.0,"night_setpoint_f":60.0,"hysteresis_f":1.0,"max_temp_f":85.0,
-         "stale_minutes":20,"alert_below_f":1.5,"alert_phone":"","alert_email":"","alerts_enabled":true}
+         "stale_minutes":20,"alert_below_f":1.5,"alert_phone":"","alert_email":"","alerts_enabled":true,
+         "alert_high_f":85.0,"alert_low_f":55.0}
         """)
         XCTAssertEqual(s.daySetpointF, 75)
         XCTAssertEqual(s.staleMinutes, 20)
+        XCTAssertEqual(s.alertHighF, 85)
+        XCTAssertEqual(s.alertLowF, 55)
         let patch = try JSONSerialization.jsonObject(with: JSONEncoder().encode(s)) as! [String: Any]
         XCTAssertEqual(Set(patch.keys), [
             "mode", "day_start", "day_end", "day_setpoint_f", "night_setpoint_f",
             "hysteresis_f", "max_temp_f", "stale_minutes", "alert_below_f", "alerts_enabled",
+            "alert_high_f", "alert_low_f",
         ])
         XCTAssertNil(patch["plug_url"], "the patch must never touch the plug address")
     }

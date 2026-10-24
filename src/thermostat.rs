@@ -64,12 +64,26 @@ pub struct Settings {
     pub alert_phone: String,
     pub alert_email: String,
     pub alerts_enabled: bool,
+    /// Text at once when the room goes over this (°F).
+    #[serde(default = "default_alert_high")]
+    pub alert_high_f: f64,
+    /// Text at once when the room goes under this (°F).
+    #[serde(default = "default_alert_low")]
+    pub alert_low_f: f64,
     /// Correction the Wi-Fi sensor applies to its own temperature (°F).
     #[serde(default)]
     pub sensor_temp_offset_f: f64,
     /// Correction the Wi-Fi sensor applies to its own humidity (%RH).
     #[serde(default)]
     pub sensor_humidity_offset: f64,
+}
+
+fn default_alert_high() -> f64 {
+    85.0
+}
+
+fn default_alert_low() -> f64 {
+    55.0
 }
 
 impl Settings {
@@ -89,6 +103,8 @@ impl Settings {
             alert_phone: String::new(),
             alert_email: String::new(),
             alerts_enabled: true,
+            alert_high_f: default_alert_high(),
+            alert_low_f: default_alert_low(),
             sensor_temp_offset_f: 0.0,
             sensor_humidity_offset: 0.0,
         }
@@ -138,6 +154,17 @@ impl Settings {
         }
         if !(0.0..=20.0).contains(&self.alert_below_f) {
             return Err("alert_below_f must be between 0 and 20 °F".into());
+        }
+        for (name, v) in [
+            ("alert_high_f", self.alert_high_f),
+            ("alert_low_f", self.alert_low_f),
+        ] {
+            if !(32.0..=120.0).contains(&v) {
+                return Err(format!("{name} must be between 32 and 120 °F"));
+            }
+        }
+        if self.alert_low_f >= self.alert_high_f {
+            return Err("alert_low_f must be below alert_high_f".into());
         }
         if !(-10.0..=10.0).contains(&self.sensor_temp_offset_f) {
             return Err("sensor_temp_offset_f must be between -10 and 10 °F".into());
@@ -946,6 +973,22 @@ mod tests {
 
     fn patch(v: Value) -> Result<Settings, String> {
         apply_patch(&s(), &v)
+    }
+
+    #[test]
+    fn high_and_low_alerts_default_to_85_and_55_and_must_be_ordered() {
+        let old: Settings = serde_json::from_value({
+            let mut v = serde_json::to_value(s()).unwrap();
+            v.as_object_mut().unwrap().remove("alert_high_f");
+            v.as_object_mut().unwrap().remove("alert_low_f");
+            v
+        })
+        .unwrap();
+        assert_eq!((old.alert_high_f, old.alert_low_f), (85.0, 55.0));
+        assert!(patch(json!({"alert_high_f": 88.0, "alert_low_f": 50.0})).is_ok());
+        assert!(patch(json!({"alert_low_f": 85.0})).is_err());
+        assert!(patch(json!({"alert_high_f": 120.5})).is_err());
+        assert!(patch(json!({"alert_low_f": 31.5})).is_err());
     }
 
     #[test]
