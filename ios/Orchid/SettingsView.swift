@@ -108,6 +108,7 @@ struct SettingsView: View {
             let s = try await client.settings()
             loaded = s
             draft = s
+            message = nil
         } catch {
             message = (error.localizedDescription, false)
         }
