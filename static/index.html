@@ -95,6 +95,10 @@
   /* Settings panel */
   details.settings { margin-top: 16px; background: var(--panel);
     border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+  .ftable { border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .ftable th, .ftable td { padding: 4px 14px 4px 0; text-align: right; }
+  .ftable th:first-child, .ftable td:first-child { text-align: left; }
+  .fnote { color: var(--muted, #666); margin: 6px 0 0; }
   details.settings summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
   .sgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15em, 1fr));
     gap: 10px 18px; margin: 12px 0; }
@@ -156,6 +160,12 @@
     <span id="count" style="margin-left:auto"></span>
   </div>
   <div class="empty" id="empty" hidden>No data yet — waiting for the first report from the sensor.</div>
+
+  <details class="settings" id="forecastPanel">
+    <summary>Forecast vs room</summary>
+    <p class="fnote">Each day's National Weather Service forecast high for the house next to the room's actual high and low. Tracking only: the forecast does not change the heater.</p>
+    <table class="ftable"><thead><tr><th>Date</th><th>Forecast high</th><th>Room high</th><th>Room low</th></tr></thead><tbody id="fbody"></tbody></table>
+  </details>
 
   <details class="settings" id="settingsPanel">
     <summary>Thermostat settings</summary>
@@ -995,6 +1005,9 @@ async function loadStatus() {
   } else {
     chips.push(`<span class="chip">Heater <b>OFF</b></span>`);
   }
+  if (st.forecast_high_f != null) {
+    chips.push(`<span class="chip">Forecast high <b>${Math.round(st.forecast_high_f)}°F</b></span>`);
+  }
   chips.push(`<span class="chip">${ageText(st.reading_age_s)}</span>`);
   // 24 h and 7 day temperature extremes. Decoration: a failure must not hide status.
   try {
@@ -1015,6 +1028,21 @@ const HEATER_DRAW_MIN_W = 5;
 // ---- thermostat settings --------------------------------------------------
 const NUMERIC = ['day_setpoint_f', 'night_setpoint_f', 'hysteresis_f', 'max_temp_f', 'stale_minutes', 'alert_below_f', 'alert_high_f', 'alert_low_f', 'sensor_temp_offset_f', 'sensor_humidity_offset'];
 function smsg(text, cls) { const m = $('smsg'); m.textContent = text || ''; m.className = cls || ''; }
+
+// ---- forecast vs room ------------------------------------------------------
+async function loadForecast() {
+  const deg = v => v == null ? '—' : v.toFixed(1) + '°';
+  try {
+    const { days } = await getJSON('/api/forecast?days=30');
+    $('fbody').innerHTML = days.map(d => {
+      const fc = d.first_forecast_high_f ?? d.forecast_high_f;
+      return `<tr><td>${d.date}</td><td>${fc == null ? '—' : Math.round(fc) + '°'}</td>` +
+        `<td>${deg(d.room_high_f)}</td><td>${deg(d.room_low_f)}</td></tr>`;
+    }).join('');
+  } catch (e) {
+    $('fbody').innerHTML = `<tr><td colspan="4">Could not load: ${e.message}</td></tr>`;
+  }
+}
 
 async function loadSettings() {
   let s;
@@ -1080,6 +1108,9 @@ async function refresh() {
   $('sform').addEventListener('submit', saveSettings);
   // Fill the form when it opens, not on every refresh, so a refresh never
   // overwrites what someone is typing.
+  $('forecastPanel').addEventListener('toggle', () => {
+    if ($('forecastPanel').open) loadForecast();
+  });
   $('settingsPanel').addEventListener('toggle', () => {
     if ($('settingsPanel').open) loadSettings();
   });

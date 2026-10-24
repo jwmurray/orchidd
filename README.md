@@ -174,6 +174,8 @@ edited from the web page's **Thermostat settings** panel or the API.
 | `alert_below_f`    | `1.5`                 | 0–20                                          |
 | `alert_high_f`     | `85.0`                | 32–120; texts at once when over, hourly repeat |
 | `alert_low_f`      | `55.0`                | 32–120, below `alert_high_f`; same, when under |
+| `forecast_enabled` | `true`                | fetch the NWS forecast hourly (tracking only)  |
+| `forecast_lat`, `forecast_lon` | the house  | where the forecast is for                       |
 | `alert_phone`      | `""`                  | stored only                                   |
 | `alert_email`      | `""`                  | stored only                                   |
 | `alerts_enabled`   | `true`                | stored only                                   |
