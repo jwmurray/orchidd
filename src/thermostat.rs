@@ -70,6 +70,13 @@ pub struct Settings {
     /// Text at once when the room goes under this (°F).
     #[serde(default = "default_alert_low")]
     pub alert_low_f: f64,
+    /// Fetch the NWS forecast for the record. It does not drive the heater.
+    #[serde(default = "default_true")]
+    pub forecast_enabled: bool,
+    #[serde(default = "default_forecast_lat")]
+    pub forecast_lat: f64,
+    #[serde(default = "default_forecast_lon")]
+    pub forecast_lon: f64,
     /// Correction the Wi-Fi sensor applies to its own temperature (°F).
     #[serde(default)]
     pub sensor_temp_offset_f: f64,
@@ -84,6 +91,19 @@ fn default_alert_high() -> f64 {
 
 fn default_alert_low() -> f64 {
     55.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// The house in Bountiful, UT.
+fn default_forecast_lat() -> f64 {
+    40.8791
+}
+
+fn default_forecast_lon() -> f64 {
+    -111.8483
 }
 
 impl Settings {
@@ -105,6 +125,9 @@ impl Settings {
             alerts_enabled: true,
             alert_high_f: default_alert_high(),
             alert_low_f: default_alert_low(),
+            forecast_enabled: true,
+            forecast_lat: default_forecast_lat(),
+            forecast_lon: default_forecast_lon(),
             sensor_temp_offset_f: 0.0,
             sensor_humidity_offset: 0.0,
         }
@@ -165,6 +188,11 @@ impl Settings {
         }
         if self.alert_low_f >= self.alert_high_f {
             return Err("alert_low_f must be below alert_high_f".into());
+        }
+        if !(-90.0..=90.0).contains(&self.forecast_lat)
+            || !(-180.0..=180.0).contains(&self.forecast_lon)
+        {
+            return Err("forecast_lat/forecast_lon must be a valid latitude and longitude".into());
         }
         if !(-10.0..=10.0).contains(&self.sensor_temp_offset_f) {
             return Err("sensor_temp_offset_f must be between -10 and 10 °F".into());
@@ -232,6 +260,7 @@ pub fn apply_patch(current: &Settings, patch: &Value) -> Result<Settings, String
 }
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(crate::forecast::SCHEMA)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (
             key   TEXT PRIMARY KEY,
@@ -701,6 +730,11 @@ pub async fn run<P: Plug>(mut c: Controller<P>, wake: Arc<tokio::sync::Notify>) 
 // Status + graph helpers for the API
 // ---------------------------------------------------------------------------
 
+/// Today's forecast high in the settings' time zone.
+pub fn forecast_today(conn: &Connection, s: &Settings, now: i64) -> Option<f64> {
+    crate::forecast::high_for(conn, local_time(s, now).date_naive())
+}
+
 /// Pick the single most important alert, or None.
 pub fn compute_alert(
     s: &Settings,
@@ -761,6 +795,7 @@ pub fn status_json(conn: &Connection, ctrl: &ControllerStatus, now: i64) -> Valu
         "plug_error": ctrl.plug_error,
         "mode": settings.mode,
         "alert": alert,
+        "forecast_high_f": forecast_today(conn, &settings, now),
     })
 }
 
@@ -1029,6 +1064,28 @@ mod tests {
 
     fn patch(v: Value) -> Result<Settings, String> {
         apply_patch(&s(), &v)
+    }
+
+    #[tokio::test]
+    async fn the_forecast_is_reported_but_does_not_change_the_heater() {
+        let db = test_db();
+        let date = Utc
+            .timestamp_opt(NOON, 0)
+            .unwrap()
+            .with_timezone(&Denver)
+            .date_naive();
+        crate::forecast::store_highs(&db.lock().unwrap(), &[(date, 80.0)], NOON).unwrap();
+        let plug = FakePlug::default();
+        let status = Arc::new(Mutex::new(ControllerStatus::default()));
+        let mut c = Controller::new(plug.clone(), db.clone(), status.clone());
+        add_reading(&db, NOON, 70.0);
+        c.step(NOON).await;
+        assert_eq!(plug.commands(), ["on:900"], "75° day minimum still applies");
+        let st = status.lock().unwrap().clone();
+        let json = status_json(&db.lock().unwrap(), &st, NOON);
+        assert_eq!(json["setpoint_f"], 75.0);
+        assert_eq!(json["forecast_high_f"], 80.0);
+        assert!(patch(json!({"forecast_lat": 91.0})).is_err());
     }
 
     #[test]

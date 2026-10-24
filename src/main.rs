@@ -7,6 +7,7 @@
 //! captured. Readings are stored in SQLite and served as JSON to the web UI.
 
 mod blu;
+mod forecast;
 mod sensor_config;
 mod thermostat;
 
@@ -195,6 +196,7 @@ async fn main() {
         state.heater.clone(),
     );
     tokio::spawn(thermostat::run(controller, state.wake.clone()));
+    tokio::spawn(forecast::run(state.db.clone()));
 
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
@@ -208,6 +210,7 @@ async fn main() {
         .route("/api/status", get(api_status))
         .route("/api/settings", get(api_settings_get).put(api_settings_put))
         .route("/api/heater", get(api_heater))
+        .route("/api/forecast", get(api_forecast))
         .route("/api/blu", post(api_blu))
         // Progressive-web-app assets, so the graph installs to a phone's home
         // screen and runs full-screen like a native app.
@@ -621,6 +624,21 @@ async fn api_settings_put(
         }
         Err(e) => bad(e),
     }
+}
+
+/// Forecast high against the room's high and low, one row per day, newest
+/// first: the record for learning how warm a forecast day makes the room.
+async fn api_forecast(
+    State(state): State<AppState>,
+    Query(q): Query<DataQuery>,
+) -> impl IntoResponse {
+    let days = q.days.unwrap_or(30.0).clamp(1.0, 366.0) as u32;
+    let conn = state.db.lock().unwrap();
+    let tz = thermostat::load_settings(&conn)
+        .ok()
+        .and_then(|s| s.timezone.parse().ok())
+        .unwrap_or(chrono_tz::America::Denver);
+    Json(json!({ "days": forecast::history(&conn, tz, now_unix(), days) }))
 }
 
 /// Plug-on and heating intervals for the graph, over the same `days` window as
