@@ -160,4 +160,16 @@ final class OrchidTests: XCTestCase {
         let edges = bands.dropFirst().map(\.start)
         XCTAssertEqual(edges.map { DayNight.label($0, tz: tz) }, ["9:00 PM\n10/23", "7:00 AM\n10/24"])
     }
+
+    func testHeatingBandsComeFromPowerDrawNotThePlug() throws {
+        let h = try decode(HeaterIntervals.self, """
+        {"intervals":[[1000,9000]],"heating":[[5000,9000]]}
+        """)
+        let from = Date(milliseconds: 0), to = Date(milliseconds: 10_000)
+        XCTAssertEqual(h.heatingClipped(from: from, to: to),
+                       [Date(milliseconds: 5000)...Date(milliseconds: 9000)])
+        XCTAssertEqual(h.onSeconds(from: from, to: to), 8)
+        let old = try decode(HeaterIntervals.self, #"{"intervals":[[1000,9000]]}"#)
+        XCTAssertEqual(old.heatingClipped(from: from, to: to), [])
+    }
 }

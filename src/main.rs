@@ -623,7 +623,7 @@ async fn api_settings_put(
     }
 }
 
-/// Heater-on intervals for the graph, over the same `days` window as
+/// Plug-on and heating intervals for the graph, over the same `days` window as
 /// /api/data. Times are ms epoch, matching /api/data's `t`.
 async fn api_heater(
     State(state): State<AppState>,
@@ -632,12 +632,18 @@ async fn api_heater(
     let days = q.days.unwrap_or(7.0).clamp(0.01, 3650.0);
     let now = now_unix();
     let cutoff = now - (days * 86400.0) as i64;
-    let intervals = thermostat::heater_intervals(&state.db.lock().unwrap(), cutoff, now);
-    let on: Vec<[i64; 2]> = intervals
-        .iter()
-        .map(|(a, b)| [a * 1000, b * 1000])
-        .collect();
-    Json(json!({ "intervals": on }))
+    let ms = |v: Vec<(i64, i64)>| -> Vec<[i64; 2]> {
+        v.iter().map(|(a, b)| [a * 1000, b * 1000]).collect()
+    };
+    let (on, heating) = {
+        let conn = state.db.lock().unwrap();
+        (
+            thermostat::heater_intervals(&conn, cutoff, now),
+            thermostat::heating_intervals(&conn, cutoff, now),
+        )
+    };
+    // `intervals`: plug switched on. `heating`: heater drawing power.
+    Json(json!({ "intervals": ms(on), "heating": ms(heating) }))
 }
 
 #[cfg(test)]
