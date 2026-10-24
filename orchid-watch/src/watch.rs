@@ -353,13 +353,32 @@ fn deg(v: f64) -> String {
     }
 }
 
-fn heater_sentence(s: &Status) -> String {
+/// Below this the plug is on but nothing is plugged into it.
+const HEATER_DRAW_MIN_W: f64 = 5.0;
+
+/// What the heater is doing, as a clause: drawing power, switched on with
+/// nothing drawing, or switched off by the thermostat.
+fn heater_state(s: &Status) -> Option<String> {
     match (s.heater_on, s.apower_w) {
-        (Some(true), Some(w)) => format!(" Heater is ON ({w:.0} W)."),
-        (Some(true), None) => " Heater is ON.".into(),
-        (Some(false), _) => " Heater is OFF.".into(),
-        (None, _) => String::new(),
+        (Some(true), Some(w)) if w < HEATER_DRAW_MIN_W => {
+            Some(format!("plug activated — heater not plugged in ({w:.0} W)"))
+        }
+        (Some(true), Some(w)) => Some(format!("heater ON ({w:.0} W)")),
+        (Some(true), None) => Some("heater ON".into()),
+        (Some(false), _) => Some("heater OFF".into()),
+        (None, _) => None,
     }
+}
+
+fn heater_sentence(s: &Status) -> String {
+    let Some(h) = heater_state(s) else {
+        return String::new();
+    };
+    let h = h.replacen("heater ON", "heater is ON", 1);
+    let h = h.replacen("heater OFF", "heater is OFF", 1);
+    let mut c = h.chars();
+    let first = c.next().map(|f| f.to_ascii_uppercase()).unwrap_or_default();
+    format!(" {first}{}.", c.as_str())
 }
 
 fn mins(secs: i64) -> i64 {
@@ -381,11 +400,10 @@ pub fn compose(cond: Condition, kind: Kind, cx: &Ctx) -> (String, String) {
     let temp = cx.status.and_then(|s| s.temp_f);
     let temp_txt = temp.map_or("temperature unknown".to_string(), |t| format!("{t:.1}°F"));
     if kind == Kind::Recovery {
-        let heater = match cx.status.and_then(|s| s.heater_on) {
-            Some(true) => ", heater ON",
-            Some(false) => ", heater OFF",
-            None => "",
-        };
+        let heater = cx
+            .status
+            .and_then(heater_state)
+            .map_or(String::new(), |h| format!(", {h}"));
         let lead = match cond {
             Condition::OrchiddDown => "Orchid monitor back online",
             Condition::SensorStale => "Sensor reporting again",
@@ -1039,6 +1057,43 @@ mod tests {
         assert_eq!(normalize_phone("2 801 555 0101"), None);
         assert_eq!(normalize_phone("801+555+0101"), None);
         assert_eq!(normalize_phone("0801555010"), None);
+    }
+
+    // -- heater wording -----------------------------------------------------
+
+    #[test]
+    fn plug_on_drawing_nothing_says_the_heater_is_not_plugged_in() {
+        let (w, mut wt) = rig(MIDNIGHT_DENVER + 2 * H, false);
+        let mut s = below(66.6, "day", 75.0);
+        s.apower_w = Some(0.0);
+        w.borrow_mut().status = Some(s);
+        run(&w, &mut wt, 11);
+        assert_eq!(
+            sms(&w)[0].1,
+            "8.4° below the 75° day setting. \
+             Plug activated — heater not plugged in (0 W)."
+        );
+        let mut on = ok_status(75.5, "day", 75.0);
+        on.heater_on = Some(true);
+        w.borrow_mut().status = Some(on);
+        run(&w, &mut wt, 1);
+        assert_eq!(
+            sms(&w)[1].1,
+            "Back to normal: 75.5°F, plug activated — heater not plugged in (0 W)."
+        );
+    }
+
+    #[test]
+    fn plug_on_drawing_power_says_heater_on_in_recovery_too() {
+        let (w, mut wt) = rig(MIDNIGHT_DENVER + 2 * H, false);
+        w.borrow_mut().status = Some(below(58.1, "night", 60.0));
+        run(&w, &mut wt, 11);
+        let mut on = ok_status(60.2, "night", 60.0);
+        on.heater_on = Some(true);
+        on.apower_w = Some(905.0);
+        w.borrow_mut().status = Some(on);
+        run(&w, &mut wt, 1);
+        assert_eq!(sms(&w)[1].1, "Back to normal: 60.2°F, heater ON (905 W).");
     }
 
     // -- thresholds ---------------------------------------------------------
