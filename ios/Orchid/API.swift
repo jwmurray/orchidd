@@ -85,10 +85,22 @@ struct Series: Decodable, Equatable {
 }
 
 struct HeaterIntervals: Decodable, Equatable {
+    /// Plug switched on.
     let intervals: [[Int64]]
+    /// Heater drawing power. Missing from older servers.
+    var heating: [[Int64]]? = nil
 
-    /// On-periods clipped to [from, to], dropping any that fall outside.
+    /// Plug-on periods clipped to [from, to], dropping any that fall outside.
     func clipped(from: Date, to: Date) -> [ClosedRange<Date>] {
+        Self.clip(intervals, from: from, to: to)
+    }
+
+    /// Heating periods clipped to [from, to].
+    func heatingClipped(from: Date, to: Date) -> [ClosedRange<Date>] {
+        Self.clip(heating ?? [], from: from, to: to)
+    }
+
+    private static func clip(_ intervals: [[Int64]], from: Date, to: Date) -> [ClosedRange<Date>] {
         intervals.compactMap { pair in
             guard pair.count == 2 else { return nil }
             let start = max(Date(milliseconds: pair[0]), from)

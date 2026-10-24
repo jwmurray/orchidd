@@ -245,7 +245,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             temp_f    REAL,
             apower    REAL
         );
-        CREATE INDEX IF NOT EXISTS idx_heater_events_ts ON heater_events(ts);",
+        CREATE INDEX IF NOT EXISTS idx_heater_events_ts ON heater_events(ts);
+        CREATE TABLE IF NOT EXISTS heat_events (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      INTEGER NOT NULL,
+            heating INTEGER NOT NULL,
+            apower  REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_heat_events_ts ON heat_events(ts);",
     )
 }
 
@@ -487,9 +494,17 @@ pub fn latest_reading(conn: &Connection) -> Option<(i64, f64, f64)> {
     .flatten()
 }
 
-fn last_event_state(conn: &Connection) -> Option<bool> {
+/// Below this the plug is on but nothing is drawing: the heater is
+/// unplugged, switched off at the unit, or tripped.
+pub const HEATING_MIN_W: f64 = 5.0;
+
+/// The heater-on and heating logs share one shape: (ts, flag) transitions.
+const HEATER_LOG: (&str, &str) = ("heater_events", "heater_on");
+const HEAT_LOG: (&str, &str) = ("heat_events", "heating");
+
+fn last_event_state(conn: &Connection, (table, col): (&str, &str)) -> Option<bool> {
     conn.query_row(
-        "SELECT heater_on FROM heater_events ORDER BY ts DESC, id DESC LIMIT 1",
+        &format!("SELECT {col} FROM {table} ORDER BY ts DESC, id DESC LIMIT 1"),
         [],
         |r| r.get::<_, bool>(0),
     )
@@ -506,17 +521,26 @@ pub struct Controller<P: Plug> {
     last_refresh: Option<i64>,
     /// Last state written to heater_events.
     last_logged: Option<bool>,
+    /// Last state written to heat_events.
+    last_heating: Option<bool>,
 }
 
 impl<P: Plug> Controller<P> {
     pub fn new(plug: P, db: Arc<Mutex<Connection>>, status: Arc<Mutex<ControllerStatus>>) -> Self {
-        let last_logged = last_event_state(&db.lock().unwrap());
+        let (last_logged, last_heating) = {
+            let conn = db.lock().unwrap();
+            (
+                last_event_state(&conn, HEATER_LOG),
+                last_event_state(&conn, HEAT_LOG),
+            )
+        };
         Controller {
             plug,
             db,
             status,
             last_refresh: None,
             last_logged,
+            last_heating,
         }
     }
 
@@ -617,6 +641,24 @@ impl<P: Plug> Controller<P> {
                 d.reason,
                 temp_f.map_or("none".into(), |t| format!("{t:.1}°F"))
             );
+        }
+
+        // Heating means the heater is actually drawing power, not just that
+        // the plug is on. Unknown power (a failed read-back) logs nothing.
+        let heating = match (real.output, real.apower) {
+            (false, _) => Some(false),
+            (true, Some(w)) => Some(w >= HEATING_MIN_W),
+            (true, None) => None,
+        };
+        if heating.is_some() && heating != self.last_heating {
+            let db = self.db.lock().unwrap();
+            if let Err(e) = db.execute(
+                "INSERT INTO heat_events (ts, heating, apower) VALUES (?1, ?2, ?3)",
+                rusqlite::params![now, heating, real.apower],
+            ) {
+                eprintln!("thermostat: heat_events insert: {e}");
+            }
+            self.last_heating = heating;
         }
 
         if let Some(e) = &error {
@@ -725,9 +767,23 @@ pub fn status_json(conn: &Connection, ctrl: &ControllerStatus, now: i64) -> Valu
 /// Heater-on intervals overlapping `[from, to]`, as unix-second pairs. An
 /// interval still open at `to` ends at `to`.
 pub fn heater_intervals(conn: &Connection, from: i64, to: i64) -> Vec<(i64, i64)> {
+    on_intervals(conn, HEATER_LOG, from, to)
+}
+
+/// When the heater was drawing power, as opposed to merely switched on.
+pub fn heating_intervals(conn: &Connection, from: i64, to: i64) -> Vec<(i64, i64)> {
+    on_intervals(conn, HEAT_LOG, from, to)
+}
+
+fn on_intervals(
+    conn: &Connection,
+    (table, col): (&str, &str),
+    from: i64,
+    to: i64,
+) -> Vec<(i64, i64)> {
     let before: Option<bool> = conn
         .query_row(
-            "SELECT heater_on FROM heater_events WHERE ts < ?1 ORDER BY ts DESC, id DESC LIMIT 1",
+            &format!("SELECT {col} FROM {table} WHERE ts < ?1 ORDER BY ts DESC, id DESC LIMIT 1"),
             [from],
             |r| r.get(0),
         )
@@ -740,9 +796,9 @@ pub fn heater_intervals(conn: &Connection, from: i64, to: i64) -> Vec<(i64, i64)
         None
     };
     let mut out = Vec::new();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT ts, heater_on FROM heater_events WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts, id",
-    ) else {
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT ts, {col} FROM {table} WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts, id"
+    )) else {
         return out;
     };
     let Ok(rows) = stmt.query_map([from, to], |r| {
@@ -1061,6 +1117,8 @@ mod tests {
         output: bool,
         calls: Vec<String>,
         unreachable: bool,
+        /// Plug on, but nothing plugged into it: draws 0 W.
+        unplugged: bool,
     }
 
     #[derive(Clone, Default)]
@@ -1088,7 +1146,11 @@ mod tests {
             st.calls.push("status".into());
             Ok(PlugStatus {
                 output: st.output,
-                apower: Some(if st.output { 1400.0 } else { 0.0 }),
+                apower: Some(if st.output && !st.unplugged {
+                    1400.0
+                } else {
+                    0.0
+                }),
             })
         }
         async fn set_on(&self, _base: &str, toggle_after_secs: u32) -> Result<(), String> {
@@ -1193,6 +1255,34 @@ mod tests {
         assert_eq!(
             heater_intervals(&conn, NOON - 3600, NOON + 3600),
             vec![(NOON, NOON + 20 * 60)]
+        );
+    }
+
+    #[tokio::test]
+    async fn heating_is_logged_only_while_the_heater_draws_power() {
+        let db = test_db();
+        let plug = FakePlug::default();
+        plug.0.lock().unwrap().unplugged = true;
+        let status = Arc::new(Mutex::new(ControllerStatus::default()));
+        let mut c = Controller::new(plug.clone(), db.clone(), status.clone());
+
+        add_reading(&db, NOON, 70.0);
+        c.step(NOON).await;
+        c.step(NOON + 60).await;
+        // Someone plugs the heater in.
+        plug.0.lock().unwrap().unplugged = false;
+        add_reading(&db, NOON + 120, 70.0);
+        c.step(NOON + 120).await;
+        c.step(NOON + 180).await;
+
+        let conn = db.lock().unwrap();
+        assert_eq!(
+            heater_intervals(&conn, NOON - 60, NOON + 240),
+            vec![(NOON, NOON + 240)]
+        );
+        assert_eq!(
+            heating_intervals(&conn, NOON - 60, NOON + 240),
+            vec![(NOON + 120, NOON + 240)]
         );
     }
 

@@ -151,6 +151,7 @@
     <span>BLU sensor</span>
     <span><i class="swatch" style="background:var(--day);height:10px;outline:1px solid var(--border)"></i> Day</span>
     <span><i class="swatch" style="background:var(--night);height:10px;outline:1px solid var(--border)"></i> Night</span>
+    <span><i class="swatch" style="background:var(--heat);opacity:.35"></i> Heating</span>
     <span><i class="swatch" style="background:var(--heat)"></i> <span id="heaterLegend">Heater plug (raised = on)</span></span>
     <span id="count" style="margin-left:auto"></span>
   </div>
@@ -250,7 +251,8 @@ let data = { t: [], tempF: [], hum: [] };      // points inside the window
 // readings. The Wi-Fi sensor is still logged; its numbers appear as text only.
 let wifi = { t: [], tempF: [], hum: [] };      // Wi-Fi points inside the window
 let latestWifi = null;                         // its newest reading
-let heaterOn = [];                             // [[startMs, endMs], ...] heater-on bands
+let heaterOn = [];                             // [[startMs, endMs], ...] plug switched on
+let heating = [];                              // [[startMs, endMs], ...] heater drawing power
 let heaterKnown = false;                       // false when /api/heater failed
 let schedule = null;                           // { start: "07:00", end: "21:00", tz } from settings
 // Vertical gridlines: 'daynight' marks each day/night switch from the
@@ -405,9 +407,11 @@ async function loadData() {
     raw = await getJSON('/api/data?days=' + fetchDays.toFixed(3));
     // Heater bands are decoration: a failure here must not hide the graph.
     try {
-      heaterOn = (await getJSON('/api/heater?days=' + fetchDays.toFixed(3))).intervals || [];
+      const h = await getJSON('/api/heater?days=' + fetchDays.toFixed(3));
+      heaterOn = h.intervals || [];
+      heating = h.heating || [];
       heaterKnown = true;
-    } catch (e) { heaterOn = []; heaterKnown = false; }
+    } catch (e) { heaterOn = []; heating = []; heaterKnown = false; }
     try {
       const st = await getJSON('/api/settings');
       schedule = { start: st.day_start, end: st.day_end, tz: st.timezone };
@@ -825,12 +829,14 @@ function drawDayNightLines(edges, x, t0, t1, padT, H) {
   ctx.restore();
 }
 
+// Shaded only while the heater draws power: a plug that is on with the
+// heater unplugged is not heating the room.
 function drawHeaterBands(x, t0, t1, padT, H) {
-  if (!heaterOn.length) return;
+  if (!heating.length) return;
   ctx.save();
   ctx.fillStyle = HEAT;
   ctx.globalAlpha = 0.18;
-  for (const [a, b] of heaterOn) {
+  for (const [a, b] of heating) {
     const s = Math.max(a, t0), e = Math.min(b, t1);
     if (e <= s) continue;
     const xs = x(s), w = Math.max(1, x(e) - xs);

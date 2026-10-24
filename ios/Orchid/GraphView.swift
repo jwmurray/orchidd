@@ -85,7 +85,9 @@ struct GraphView: View {
         return on > 0 ? "On \(Duration_.text(on)) during \(period)." : "Off for \(period)."
     }
 
-    private var onPeriods: [ClosedRange<Date>] { heater.clipped(from: window.from, to: window.to) }
+    private var heatingPeriods: [ClosedRange<Date>] {
+        heater.heatingClipped(from: window.from, to: window.to)
+    }
 
     private var bands: [DayNight.Band] {
         guard let schedule else { return [] }
@@ -101,7 +103,8 @@ struct GraphView: View {
                 RectangleMark(xStart: .value("From", b.start), xEnd: .value("To", b.end))
                     .foregroundStyle(b.isDay ? Color.day : Color.night)
             }
-            ForEach(Array(onPeriods.enumerated()), id: \.offset) { _, r in
+            // Darker only while the heater draws power, not merely while the plug is on.
+            ForEach(Array(heatingPeriods.enumerated()), id: \.offset) { _, r in
                 RectangleMark(xStart: .value("On", r.lowerBound), xEnd: .value("Off", r.upperBound))
                     .foregroundStyle(Color.heat.opacity(0.28))
             }
