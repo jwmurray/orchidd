@@ -65,6 +65,13 @@ pub fn high_for(conn: &Connection, date: NaiveDate) -> Option<f64> {
     .flatten()
 }
 
+/// When NWS last answered, for spotting a fetch that has quietly stopped.
+pub fn last_fetch_ts(conn: &Connection) -> Option<i64> {
+    conn.query_row("SELECT MAX(fetched_ts) FROM forecasts", [], |r| r.get(0))
+        .ok()
+        .flatten()
+}
+
 /// One row per day: the forecast against what the room did.
 #[derive(Debug, PartialEq, serde::Serialize)]
 pub struct DayRecord {
