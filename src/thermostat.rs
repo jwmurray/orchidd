@@ -796,6 +796,8 @@ pub fn status_json(conn: &Connection, ctrl: &ControllerStatus, now: i64) -> Valu
         "mode": settings.mode,
         "alert": alert,
         "forecast_high_f": forecast_today(conn, &settings, now),
+        "forecast_enabled": settings.forecast_enabled,
+        "forecast_age_s": crate::forecast::last_fetch_ts(conn).map(|t| (now - t).max(0)),
     })
 }
 
@@ -1086,6 +1088,22 @@ mod tests {
         assert_eq!(json["setpoint_f"], 75.0);
         assert_eq!(json["forecast_high_f"], 80.0);
         assert!(patch(json!({"forecast_lat": 91.0})).is_err());
+    }
+
+    #[test]
+    fn status_reports_seconds_since_the_last_forecast_fetch() {
+        let db = test_db();
+        let st = ControllerStatus::default();
+        let json = status_json(&db.lock().unwrap(), &st, NOON);
+        assert_eq!(json["forecast_age_s"], Value::Null, "never fetched");
+        assert_eq!(json["forecast_enabled"], true);
+
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
+        crate::forecast::store_highs(&db.lock().unwrap(), &[(date, 67.0)], NOON - 7200).unwrap();
+        let later = date.succ_opt().unwrap();
+        crate::forecast::store_highs(&db.lock().unwrap(), &[(later, 69.0)], NOON - 300).unwrap();
+        let json = status_json(&db.lock().unwrap(), &st, NOON);
+        assert_eq!(json["forecast_age_s"], 300, "newest fetch wins");
     }
 
     #[test]

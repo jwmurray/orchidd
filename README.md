@@ -187,7 +187,7 @@ alert so something else can act on it.
 
 | Route                    | Purpose                                                     |
 |--------------------------|-------------------------------------------------------------|
-| `GET /api/status`        | `temp_f, humidity, reading_ts, reading_age_s, period, setpoint_f, off_at_f, heater_on, apower_w, controller_reason, plug_error, mode, alert` |
+| `GET /api/status`        | `temp_f, humidity, reading_ts, reading_age_s, period, setpoint_f, off_at_f, heater_on, apower_w, controller_reason, plug_error, mode, alert, forecast_high_f, forecast_enabled, forecast_age_s` |
 | `GET /api/settings`      | All settings.                                               |
 | `PUT /api/settings`      | JSON object with any subset of settings. Validated as a whole; `400 {"error": "..."}` and nothing saved on failure. |
 | `GET /api/heater?days=N` | Heater-on intervals, `{"intervals": [[startMs, endMs], ...]}`. |
