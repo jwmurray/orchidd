@@ -16,7 +16,7 @@ web page. Three tabs on a bottom tab bar, left to right:
 ## Server
 
 - Default address `https://orchid.gardenway.org` — tailnet-only (Caddy on
-  gardenway → orchidd on RMiMac :8000). The phone must have Tailscale on.
+  gardenway → orchidd on m2max :8000). The phone must have Tailscale on.
 - Changeable in Settings → Connection (stored in `UserDefaults`).
 - No login: the tailnet is the access control, as for budget and health.
 

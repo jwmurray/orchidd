@@ -2,11 +2,11 @@
 // broadcasts to orchidd, which decodes, stores and graphs them.
 //
 // Install on the heater plug (Bluetooth enabled), named "blu-forward", set to
-// run on boot. ORCHIDD is the iMac's LAN address, the same host the Wi-Fi
+// run on boot. ORCHIDD is the m2max LAN address (moved from the iMac 2026-11-07), the same host the Wi-Fi
 // sensor's outbound websocket points at.
 
 let SENSOR = "c0:2c:ed:49:9c:b8";
-let ORCHIDD = "http://192.168.0.15:8000/api/blu";
+let ORCHIDD = "http://192.168.0.36:8000/api/blu";
 
 let lastSent = "";
 
