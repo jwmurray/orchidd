@@ -205,7 +205,7 @@ curl -s -X PUT localhost:8000/api/settings -H 'content-type: application/json' -
 
 Texts and emails come from `orchid-watch`, a separate program (workspace member
 `orchid-watch/`) that runs on another machine and reads orchidd only over HTTP,
-so an orchidd crash or a dead iMac still produces a text. Setup, testing and
+so an orchidd crash or a dead m2max still produces a text. Setup, testing and
 settings: [deploy/alerts/README.md](deploy/alerts/README.md).
 
 ## Install on an iPhone (or any phone)
